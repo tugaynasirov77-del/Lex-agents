@@ -148,17 +148,15 @@ FEEDBACK_TTL_SEC = 30 * 60   # feedback only applies if last task < 30 min ago
 
 # ------------------------------------------------------- streaming helper
 
-async def run_session(agent_id: str, user_text: str, on_chunk,
-                      *, agent_name: Optional[str] = None,
-                      attach_memory: bool = True) -> str:
-    """Create a session, send the user message, stream agent reply.
+RUN_SESSION_TIMEOUT_S = 60     # whole-operation timeout per user message
+TIMEOUT_FALLBACK_TEXT = "⏱ Агент не отвечает, попробуй ещё раз"
 
-    If `agent_name` is given and a memory store exists for that agent, attach
-    it as a read_write resource so the agent can read past tasks/profiles.
-    Set attach_memory=False for compression/summarisation calls (so the agent
-    doesn't read its own logs while writing the summary).
-    """
+
+async def _run_session_impl(agent_id: str, user_text: str, on_chunk,
+                            *, agent_name: Optional[str] = None,
+                            attach_memory: bool = True) -> str:
     assert ANTHROPIC is not None and ENVIRONMENT_ID is not None
+    label = agent_name or agent_id
 
     session_kwargs: dict = {
         "agent": agent_id,
@@ -177,12 +175,16 @@ async def run_session(agent_id: str, user_text: str, on_chunk,
                 "Писать в память самостоятельно НЕ нужно — host сделает запись после."
             ),
         }]
+
+    log.info("[%s] creating MA session for agent=%s (memory=%s)",
+             label, agent_id, bool(session_kwargs.get("resources")))
     session = await ANTHROPIC.beta.sessions.create(**session_kwargs)
+    log.info("[%s] session created: %s", label, session.id)
 
     final_text_parts: list[str] = []
-
     stream_cm = await ANTHROPIC.beta.sessions.events.stream(session.id)
     async with stream_cm as stream:
+        log.info("[%s] sending user.message (len=%d)", label, len(user_text))
         await ANTHROPIC.beta.sessions.events.send(
             session.id,
             events=[{
@@ -190,6 +192,7 @@ async def run_session(agent_id: str, user_text: str, on_chunk,
                 "content": [{"type": "text", "text": user_text}],
             }],
         )
+        log.info("[%s] awaiting agent reply…", label)
 
         async for event in stream:
             etype = getattr(event, "type", None)
@@ -202,9 +205,35 @@ async def run_session(agent_id: str, user_text: str, on_chunk,
                             await on_chunk("".join(final_text_parts))
             elif etype == "session.status_idle":
                 break
-            # tool_use events ignored for now (could surface as [Using X])
 
-    return "".join(final_text_parts).strip() or "(пустой ответ)"
+    full = "".join(final_text_parts).strip() or "(пустой ответ)"
+    log.info("[%s] reply ready: %d chars", label, len(full))
+    return full
+
+
+async def run_session(agent_id: str, user_text: str, on_chunk,
+                      *, agent_name: Optional[str] = None,
+                      attach_memory: bool = True) -> str:
+    """Create a Managed Agents session per user message and stream the reply.
+
+    Wrapped in a 60 s wall-clock timeout — if the agent hangs we surface a
+    user-visible message instead of leaving the chat silent forever.
+    """
+    label = agent_name or agent_id
+    try:
+        return await asyncio.wait_for(
+            _run_session_impl(agent_id, user_text, on_chunk,
+                              agent_name=agent_name,
+                              attach_memory=attach_memory),
+            timeout=RUN_SESSION_TIMEOUT_S,
+        )
+    except asyncio.TimeoutError:
+        log.warning("[%s] run_session timed out after %ds",
+                    label, RUN_SESSION_TIMEOUT_S)
+        return TIMEOUT_FALLBACK_TEXT
+    except Exception as e:
+        log.exception("[%s] run_session failed: %s", label, e)
+        raise
 
 
 # ----------------------------------------------------------- greetings
@@ -965,13 +994,34 @@ def make_handlers(meta: AgentMeta, agent_id: str):
         await update.message.reply_text("Команда:\n" + "\n".join(lines), parse_mode="HTML")
 
     async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        try:
+            await _on_message_impl(update, ctx)
+        except Exception as e:
+            log.exception("[%s] unhandled error in on_message: %s",
+                          meta.name, e)
+            try:
+                await update.message.reply_text(
+                    f"⚠️ Внутренняя ошибка: {type(e).__name__}: {e}"[:300])
+            except Exception:
+                pass
+
+    async def _on_message_impl(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         msg = update.message
         user_text = (msg.text or "").strip()
         if not user_text:
             return
 
         is_group = msg.chat.type in ("group", "supergroup")
+        from_user = msg.from_user
+        sender = (from_user.username or from_user.first_name) if from_user else "?"
+        log.info(
+            "[%s] received: chat_type=%s chat=%s from=@%s len=%d preview=%r",
+            meta.name, msg.chat.type, msg.chat.id, sender,
+            len(user_text), user_text[:60],
+        )
         if is_group and not _is_our_group(msg.chat):
+            log.info("[%s] dropped: chat_id %s != GROUP_CHAT_ID %s",
+                     meta.name, msg.chat.id, GROUP_CHAT_ID)
             return
 
         # ============== Project pipeline triggers (group only, orchestrator drives) ==============
