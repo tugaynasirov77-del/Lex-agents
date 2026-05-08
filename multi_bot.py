@@ -1597,42 +1597,48 @@ def _is_our_group(chat) -> bool:
 
 # ----------------------------------------------------------------- runner
 
-async def build_bot(meta: AgentMeta, token: str, agent_id: str) -> Application:
-    """Initialise one bot. Up to 5 attempts, 30s HTTP timeouts,
-    10s back-off between retries. The flakiness is on api.telegram.org —
-    not Anthropic — so we just wait it out."""
-    from telegram.request import HTTPXRequest
+async def _lazy_register_username(meta: "AgentMeta", bot) -> None:
+    """Fetch the bot's @username in the background with infinite retry.
 
-    last_err: Exception | None = None
-    for attempt in range(1, 6):  # up to 5 attempts
-        req = HTTPXRequest(connect_timeout=30, read_timeout=30,
-                           write_timeout=30, pool_timeout=30)
-        upd_req = HTTPXRequest(connect_timeout=30, read_timeout=30,
-                               write_timeout=30, pool_timeout=30)
-        app = (ApplicationBuilder()
-               .token(token)
-               .request(req)
-               .get_updates_request(upd_req)
-               .build())
-        for h in make_handlers(meta, agent_id):
-            app.add_handler(h)
+    The username is only used for /team listings, group greetings and
+    delegation messages. It's fine if it shows up a few seconds after
+    startup — polling is already running."""
+    delay = 5
+    while True:
         try:
-            await app.initialize()
-            me = await app.bot.get_me()
+            me = await bot.get_me()
             TEAM_REGISTRY[meta.name] = f"@{me.username}"
-            BOTS[meta.name] = app.bot
-            log.info("bot ready: %s -> @%s (agent=%s)", meta.name, me.username, agent_id)
-            return app
+            log.info("bot ready: %s -> @%s", meta.name, me.username)
+            return
         except Exception as e:
-            last_err = e
-            log.warning("init attempt %d/5 for %s failed: %s", attempt, meta.name, e)
-            try:
-                await app.shutdown()
-            except Exception:
-                pass
-            if attempt < 5:
-                await asyncio.sleep(10)   # fixed 10 s back-off
-    raise last_err or RuntimeError(f"build_bot failed for {meta.name}")
+            log.warning("get_me %s failed: %s — retry in %ds", meta.name, e, delay)
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 300)
+
+
+async def build_bot(meta: AgentMeta, token: str, agent_id: str) -> Application:
+    """Build a bot Application without any network calls.
+
+    Telegram polling will lazily establish the connection on its own.
+    `get_me()` runs in a background task and updates TEAM_REGISTRY when
+    the network cooperates — never blocks the main startup."""
+    from telegram.request import HTTPXRequest
+    req = HTTPXRequest(connect_timeout=30, read_timeout=30,
+                       write_timeout=30, pool_timeout=30)
+    upd_req = HTTPXRequest(connect_timeout=30, read_timeout=30,
+                           write_timeout=30, pool_timeout=30)
+    app = (ApplicationBuilder()
+           .token(token)
+           .request(req)
+           .get_updates_request(upd_req)
+           .build())
+    for h in make_handlers(meta, agent_id):
+        app.add_handler(h)
+    await app.initialize()       # local-only: sets up handlers, no network
+    BOTS[meta.name] = app.bot
+    asyncio.create_task(_lazy_register_username(meta, app.bot))
+    log.info("bot scheduled: %s (agent=%s)", meta.name, agent_id)
+    return app
 
 
 async def main() -> int:
@@ -1652,9 +1658,9 @@ async def main() -> int:
     apps: list[tuple[AgentMeta, Application]] = []
     skipped: list[str] = []
 
-    # Init agents one by one with a small pause to avoid bursting
-    # Telegram's connection limits from the same IP.
-    for idx, meta in enumerate(AGENTS):
+    # Build all bot Applications. No network calls happen here —
+    # username lookup runs in background tasks (see build_bot).
+    for meta in AGENTS:
         token = (os.environ.get(meta.token_env) or "").strip()
         agent_id = cfg["agents"].get(meta.name)
         if not token:
@@ -1663,8 +1669,6 @@ async def main() -> int:
         if not agent_id:
             skipped.append(f"{meta.name} (no agent_id in config)")
             continue
-        if idx > 0:
-            await asyncio.sleep(2)   # 2 s pause between bot inits
         try:
             app = await build_bot(meta, token, agent_id)
             apps.append((meta, app))
