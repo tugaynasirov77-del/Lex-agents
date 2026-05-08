@@ -1598,9 +1598,22 @@ def _is_our_group(chat) -> bool:
 # ----------------------------------------------------------------- runner
 
 async def build_bot(meta: AgentMeta, token: str, agent_id: str) -> Application:
+    """Initialise one bot. Up to 5 attempts, 30s HTTP timeouts,
+    10s back-off between retries. The flakiness is on api.telegram.org —
+    not Anthropic — so we just wait it out."""
+    from telegram.request import HTTPXRequest
+
     last_err: Exception | None = None
-    for attempt in range(1, 4):
-        app = ApplicationBuilder().token(token).build()
+    for attempt in range(1, 6):  # up to 5 attempts
+        req = HTTPXRequest(connect_timeout=30, read_timeout=30,
+                           write_timeout=30, pool_timeout=30)
+        upd_req = HTTPXRequest(connect_timeout=30, read_timeout=30,
+                               write_timeout=30, pool_timeout=30)
+        app = (ApplicationBuilder()
+               .token(token)
+               .request(req)
+               .get_updates_request(upd_req)
+               .build())
         for h in make_handlers(meta, agent_id):
             app.add_handler(h)
         try:
@@ -1612,12 +1625,13 @@ async def build_bot(meta: AgentMeta, token: str, agent_id: str) -> Application:
             return app
         except Exception as e:
             last_err = e
-            log.warning("init attempt %d for %s failed: %s", attempt, meta.name, e)
+            log.warning("init attempt %d/5 for %s failed: %s", attempt, meta.name, e)
             try:
                 await app.shutdown()
             except Exception:
                 pass
-            await asyncio.sleep(2 * attempt)
+            if attempt < 5:
+                await asyncio.sleep(10)   # fixed 10 s back-off
     raise last_err or RuntimeError(f"build_bot failed for {meta.name}")
 
 
@@ -1638,7 +1652,9 @@ async def main() -> int:
     apps: list[tuple[AgentMeta, Application]] = []
     skipped: list[str] = []
 
-    for meta in AGENTS:
+    # Init agents one by one with a small pause to avoid bursting
+    # Telegram's connection limits from the same IP.
+    for idx, meta in enumerate(AGENTS):
         token = (os.environ.get(meta.token_env) or "").strip()
         agent_id = cfg["agents"].get(meta.name)
         if not token:
@@ -1647,6 +1663,8 @@ async def main() -> int:
         if not agent_id:
             skipped.append(f"{meta.name} (no agent_id in config)")
             continue
+        if idx > 0:
+            await asyncio.sleep(2)   # 2 s pause between bot inits
         try:
             app = await build_bot(meta, token, agent_id)
             apps.append((meta, app))
