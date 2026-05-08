@@ -1,0 +1,22 @@
+# Secrets — NEVER commit
+.env
+.env.*
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Runtime artefacts
+*.log
+multi_bot.log
+projects/
+
+# IDE / OS
+.DS_Store
+.idea/
+.vscode/

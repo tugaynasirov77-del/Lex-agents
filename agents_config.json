@@ -1,0 +1,55 @@
+{
+  "agents": {
+    "orchestrator": "agent_011Cag2CUCTfce1NnnYQt6Zm",
+    "researcher": "agent_011Cag2CVrveHwzpEBSJz3sG",
+    "strategist": "agent_011Cag2CXmGviMgXouJtWMzz",
+    "content_writer": "agent_011Cag2CZuFkj6EZ5k4cYt4G",
+    "dev_agent": "agent_011Cag2CbjQ5YG1o3USeMrCb",
+    "analyst": "agent_011Cag2CdihmaJiYVNVtMud7",
+    "sales_agent": "agent_011Cag2CfPA7EYSBwd6Yb4tb",
+    "critic": "agent_011Cag2Cgqy4GQ4mm3gmwxEx"
+  },
+  "environment_id": "env_01VWrG1wJFM7aTEGGSxXNLsS",
+  "memory_stores": {
+    "orchestrator": "memstore_01EH4S6GoMVNweK7ztEYqmaA",
+    "researcher": "memstore_01UN9ovwHbwbj9ocBcuXrsAp",
+    "strategist": "memstore_019ozVkBJsjseYoU4PKuAoiw",
+    "content_writer": "memstore_013eAvJBNBF92hGqqhoAhuC2",
+    "dev_agent": "memstore_01QUGrGgcuY3GovFYTWNcexH",
+    "analyst": "memstore_0168LXrkio8Tpw9TE5gcTn8w",
+    "sales_agent": "memstore_01Jp56am4isB5QzWPqJwUZwy",
+    "critic": "memstore_01F26JKmHYudGw6TNK4HBypk"
+  },
+  "skills": {
+    "researcher": {
+      "telegram-analytics": "skill_01632doeXuGwLG52d92isPNt",
+      "competitor-research": "skill_01FpdbWnR8cgLNsUxxaBBKs5",
+      "cis-market": "skill_01UyCf57RR3HM3NpaGrFMFfe"
+    },
+    "strategist": {
+      "gtm-playbook": "skill_01Et2QJ5vRkeRuyNLpdWtoQW",
+      "content-strategy": "skill_01V5WqU5GbvA77qqKtm3WGKu",
+      "funnel-frameworks": "skill_01Kof5gknM3r3TYMTrYT8RfL"
+    },
+    "content_writer": {
+      "cis-copywriting": "skill_014zzdUAB3BAB4nQXcyfHWqY",
+      "telegram-formats": "skill_015YQZt5uGWXguSmURRBnBj5",
+      "viral-hooks": "skill_01JWeKvajhkAV3wxPLvhzxbL"
+    },
+    "dev_agent": {
+      "telegram-miniapps": "skill_01PDDU2BSusFzPGyDSu73dBw",
+      "bot-development": "skill_01FoWsS1HYkCYXCBEMj6N6FQ",
+      "payments-integration": "skill_01CuHeTfiqaUtioCj2dVE5jq"
+    },
+    "analyst": {
+      "telegram-metrics": "skill_011foJFPZU8CzP4ga916dq2s",
+      "ad-analytics": "skill_01CJ9fDXphUdqeihrhWjQSk4",
+      "funnel-analysis": "skill_012No6bHffLpoSfkQuV48NMg"
+    },
+    "sales_agent": {
+      "infoproduct-sales": "skill_017ZbMm9eKnpRmS4a3ty396p",
+      "objection-handling": "skill_01TgVyWZhnjuy4qcmwZZvwUQ",
+      "telegram-funnels": "skill_016YXA9Vq5cVp82vuCBNihja"
+    }
+  }
+}
