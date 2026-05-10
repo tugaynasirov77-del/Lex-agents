@@ -883,19 +883,11 @@ async def execute_agent(target_name: str, task: str, chat_id: int) -> None:
         return
 
     review_footer = ""
-    used_public_review = False
     try:
         if (target_name in AGENTS_REVIEWED_BY_CRITIC
-                and AGENT_IDS.get("critic") and BOTS.get("critic")):
-            # Group context with critic available → public dialog
-            final, review_footer = await run_with_critic_review_public(
-                target_name, target_id, task,
-                chat_id, placeholder, bot,
-            )
-            used_public_review = True
-        elif (target_name in AGENTS_REVIEWED_BY_CRITIC
                 and AGENT_IDS.get("critic")):
-            # Critic agent exists but its bot isn't running — silent loop
+            # Quiet review: status hints update one placeholder, only the
+            # final polished answer is posted as a real message.
             async def _status(s: str):
                 try:
                     await bot.edit_message_text(
@@ -922,12 +914,8 @@ async def execute_agent(target_name: str, task: str, chat_id: int) -> None:
         return
 
     final = _finalize(final) + review_footer
-    if not used_public_review:
-        # Public review already posted the answer in iterations; only post here
-        # for the simple/silent paths.
-        await send_long(bot, chat_id, f"{label}\n{final}",
-                        first_message=placeholder)
-
+    await send_long(bot, chat_id, f"{label}\n{final}",
+                    first_message=placeholder)
     asyncio.create_task(record_task(target_name, chat_id,
                                     task=task, result=final))
 
@@ -1344,24 +1332,20 @@ async def _handle_group_message(meta: AgentMeta, agent_id: str, msg, user_text: 
 
     bot_for_send = BOTS.get(meta.name) or thinking.get_bot()
     review_footer = ""
-    used_public_review = False
     try:
         if (meta.name in AGENTS_REVIEWED_BY_CRITIC
-                and AGENT_IDS.get("critic") and BOTS.get("critic")):
-            # Strip HTML — public review path posts plain text via bots
-            plain_label_msg = await bot_for_send.send_message(
-                chat_id=msg.chat.id,
-                text=f"{meta.emoji} {meta.display}:\n🔄 работаю…",
-            )
-            try:
-                await thinking.delete()
-            except Exception:
-                pass
-            final, review_footer = await run_with_critic_review_public(
-                meta.name, agent_id, task,
-                msg.chat.id, plain_label_msg, bot_for_send,
-            )
-            used_public_review = True
+                and AGENT_IDS.get("critic")):
+            async def _status(s: str):
+                try:
+                    await thinking.edit_text(
+                        header + f"<i>{_html_escape(s)}</i>",
+                        parse_mode="HTML",
+                    )
+                except Exception:
+                    pass
+            final, history = await run_with_critic_review(
+                meta.name, agent_id, task, status_cb=_status)
+            review_footer = _format_review_footer(history)
         else:
             final = await run_session(agent_id, task, on_chunk,
                                       agent_name=meta.name)
@@ -1372,10 +1356,9 @@ async def _handle_group_message(meta: AgentMeta, agent_id: str, msg, user_text: 
         return
 
     final = _finalize(final) + review_footer
-    if not used_public_review:
-        await send_long(bot_for_send, msg.chat.id,
-                        header + _html_escape(final),
-                        first_message=thinking, parse_mode="HTML")
+    await send_long(bot_for_send, msg.chat.id,
+                    header + _html_escape(final),
+                    first_message=thinking, parse_mode="HTML")
     asyncio.create_task(record_task(meta.name, msg.chat.id,
                                     task=task, result=final))
 
