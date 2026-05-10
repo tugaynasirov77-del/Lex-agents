@@ -96,7 +96,7 @@ AGENTS: list[AgentMeta] = [
               "Продажи инфопродуктов и работа с клиентами.",
               "Скрипты продаж, отработка возражений, выстраивание LTV.\n"
               "Опиши клиента/возражение — отвечу по схеме Acknowledge → Reframe → Prove → Next step."),
-    AgentMeta("critic", "🛡", "Critic", "Критик", "TELEGRAM_CRITIC_TOKEN",
+    AgentMeta("critic", "🛡", "Critic", "Аркадий Критик", "TELEGRAM_CRITIC_TOKEN",
               "Контроль качества контента и кода.",
               "Кидай текст или код — найду проблемы по чек-листу.\n"
               "Вердикт: APPROVED / NEEDS REVISION."),
@@ -261,7 +261,7 @@ NAMED_TRIGGERS: dict[str, tuple[str, ...]] = {
     "dev_agent":      ("михаил", "миша", "michael"),
     "analyst":        ("николай", "коля", "nikolay"),
     "sales_agent":    ("виктор", "victor"),
-    "critic":         ("критик", "critic", "qa"),
+    "critic":         ("аркадий", "arkadiy", "критик", "critic", "qa"),
     "orchestrator":   ("оркестратор", "orchestrator", "андрей"),
 }
 
@@ -382,7 +382,7 @@ async def run_with_critic_review_public(
         try:
             await target_bot.send_message(
                 chat_id=chat_id,
-                text=f"{label} ✅ готово, передаю Критику")
+                text=f"{label} ✅ готово, передаю Аркадию")
         except Exception:
             pass
 
@@ -395,7 +395,7 @@ async def run_with_critic_review_public(
         critic_placeholder = None
         try:
             critic_placeholder = await critic_bot.send_message(
-                chat_id=chat_id, text="🛡 Критик: проверяю…")
+                chat_id=chat_id, text="🛡 Аркадий: проверяю…")
         except Exception:
             pass
 
@@ -411,7 +411,7 @@ async def run_with_critic_review_public(
         verdict = _parse_critic_verdict(critic_text)
         critic_body = critic_text if len(critic_text) < 3800 else critic_text[:3800] + "…"
         await _post_status(critic_bot, chat_id, critic_placeholder,
-                           f"🛡 Критик:\n{critic_body}")
+                           f"🛡 Аркадий:\n{critic_body}")
 
         if verdict == "APPROVED":
             break
@@ -731,11 +731,12 @@ GREETINGS: dict[str, str] = {
     "dev_agent":      "💻 Михаил здесь.\nРазрабатываю мини-аппы, ботов и интеграции.",
     "analyst":        "📊 Николай на связи.\nАнализирую метрики, ROI и данные бизнеса.",
     "sales_agent":    "💰 Виктор здесь.\nСтрою воронки продаж и работаю с возражениями.",
+    "critic":         "🛡 Аркадий здесь.\nПроверяю качество текстов, кода и стратегий — ловлю ошибки до того как их увидит клиент.",
 }
 GREETING_FINAL = "✅ Команда в сборе. Кидай задачу — начинаем."
 
 GREETING_ORDER = ["researcher", "strategist", "content_writer",
-                  "dev_agent", "analyst", "sales_agent"]
+                  "dev_agent", "analyst", "sales_agent", "critic"]
 
 # Single regex to detect ANY trigger word, case-insensitive, word-boundary aware.
 import re as _re
@@ -1254,7 +1255,7 @@ async def _run_pipeline(chat_id: int, project_text: str) -> None:
         "2️⃣ 📐 Александр — стратегия и контент-план\n"
         "3️⃣ ✍️ Алина — 3 первых поста\n"
         "4️⃣ 📊 Николай — KPI и метрики\n"
-        "5️⃣ 🛡 Критик — проверка результатов\n"
+        "5️⃣ 🛡 Аркадий — проверка результатов\n"
         "6️⃣ 🎯 Андрей — итоговое резюме\n\n"
         "Поехали…"
     )
@@ -1985,6 +1986,7 @@ _AGENT_ALIAS: dict[str, str] = {
     "виктор": "sales_agent", "victor": "sales_agent",
     "sales": "sales_agent", "продажник": "sales_agent",
     "qa": "critic", "критик": "critic", "reviewer": "critic",
+    "аркадий": "critic", "arkadiy": "critic",
 }
 
 
