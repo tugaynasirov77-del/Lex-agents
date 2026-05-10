@@ -20,6 +20,29 @@ NO_MARKDOWN_SUFFIX = (
     "Telegram Parse Mode: отключён."
 )
 
+# Tells specialists they can pull in other team members for data they don't
+# have. The host intercepts these mentions, asks the named teammate silently,
+# feeds the answer back, and lets the speaker re-finalize. The user never
+# sees the consultation — only the polished final answer.
+COLLABORATION_HINT = (
+    "\n\n"
+    "КОМАНДНАЯ РАБОТА: если для задачи нужны данные/решения из чужой "
+    "зоны экспертизы — обратись к коллеге в своём черновике по имени "
+    "(\"Милена, дай 3 цифры по нише X\" / \"Александр, какая воронка под "
+    "это лучше\" / \"Михаил, какой стек для MVP\" и т.п.). Система "
+    "автоматически прогонит твой запрос через коллегу и даст тебе его "
+    "ответ для финализации. Используй это когда реально нужно — не на "
+    "каждой задаче. Коллеги:\n"
+    "• Милена — данные, ниши, конкуренты\n"
+    "• Александр — стратегия, бизнес-модель, MVP\n"
+    "• Алина — тексты, копирайтинг, контент\n"
+    "• Михаил — код, разработка, технические решения\n"
+    "• Николай — метрики, KPI, аналитика\n"
+    "• Виктор — продажи, воронки, монетизация"
+)
+COLLABORATION_AGENTS = {"researcher", "strategist", "content_writer",
+                        "dev_agent", "analyst", "sales_agent"}
+
 PROMPTS: dict[str, str] = {
     "orchestrator": """You are Orchestrator — CEO of an AI agency team.
 
@@ -371,6 +394,9 @@ def main() -> int:
         # JSON). Skip the suffix for orchestrator.
         if name != "orchestrator" and NO_MARKDOWN_SUFFIX.strip() not in prompt:
             prompt = prompt.rstrip() + NO_MARKDOWN_SUFFIX
+        if (name in COLLABORATION_AGENTS
+                and "КОМАНДНАЯ РАБОТА" not in prompt):
+            prompt = prompt.rstrip() + COLLABORATION_HINT
 
         last_err: Exception | None = None
         for attempt in range(1, 4):

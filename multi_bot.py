@@ -435,6 +435,139 @@ async def run_with_critic_review_public(
     return last_answer, footer
 
 
+def _extract_mention_passage(text: str, agent: str) -> str:
+    """Pick sentences from `text` that reference `agent` (by @username or
+    Russian first name). Falls back to first 300 chars."""
+    if not text:
+        return ""
+    triggers: list[str] = list(NAMED_TRIGGERS.get(agent, ()))
+    handle = TEAM_REGISTRY.get(agent, "")
+    if handle:
+        triggers.append(handle.lstrip("@").lower())
+    if not triggers:
+        return text[:300]
+    sentences = re.split(r"(?<=[.!?\n])\s+", text)
+    hits = [s.strip() for s in sentences
+            if any(t in s.lower() for t in triggers)]
+    return "\n".join(hits) or text[:300]
+
+
+async def _consult_and_refine(
+    speaker_name: str, speaker_id: str,
+    original_task: str, first_draft: str,
+    *, max_consults: int = 2,
+) -> tuple[str, list[str]]:
+    """Silent collaboration:
+       1. Detect agents mentioned in `first_draft`.
+       2. Ask each one a focused question (in-process, NO group post).
+       3. Have the speaker re-finalize the answer using collaborators' input.
+       Returns (final_answer, consulted_agent_names).
+       If nothing to consult — returns first_draft unchanged."""
+    mentions = _find_agent_mentions(first_draft, exclude=speaker_name)
+    mentions = [m for m in mentions[:max_consults]
+                if AGENT_IDS.get(m) and m != "orchestrator"]
+    if not mentions:
+        return first_draft, []
+
+    log.info("[%s] consulting silently: %s", speaker_name, ", ".join(mentions))
+    consultations: list[tuple[str, str]] = []     # (agent_name, answer)
+    for collaborator in mentions:
+        collab_meta = AGENTS_BY_NAME.get(collaborator)
+        speaker_meta = AGENTS_BY_NAME.get(speaker_name)
+        excerpt = _extract_mention_passage(first_draft, collaborator)
+        consult_task = (
+            f"К тебе обращается коллега {speaker_meta.display if speaker_meta else speaker_name} "
+            f"в рабочей группе. Это внутренняя консультация — твой ответ НЕ публикуется "
+            f"никуда напрямую, его использует только коллега для финализации задачи.\n\n"
+            f"Исходная задача от клиента:\n{original_task}\n\n"
+            f"Контекст черновика коллеги:\n---\n{first_draft.strip()[:1500]}\n---\n\n"
+            f"Конкретно к тебе обратились:\n---\n{excerpt}\n---\n\n"
+            f"Ответь по существу, кратко (3–8 строк, только полезные факты/советы)."
+        )
+        try:
+            ans = await run_session(
+                AGENT_IDS[collaborator], consult_task,
+                on_chunk=None, agent_name=collaborator)
+            consultations.append((collaborator, _finalize(ans)))
+        except Exception as e:
+            log.warning("[%s] consult of %s failed: %s",
+                        speaker_name, collaborator, e)
+
+    if not consultations:
+        return first_draft, []
+
+    digest = "\n\n".join(
+        f"--- Ответ {AGENTS_BY_NAME[n].display if AGENTS_BY_NAME.get(n) else n} ---\n{a}"
+        for n, a in consultations
+    )
+    refine_task = (
+        f"{original_task}\n\n"
+        f"--- Твой первый черновик ---\n{first_draft}\n--- Конец черновика ---\n\n"
+        f"--- Ответы коллег по твоим вопросам ---\n{digest}\n--- Конец ---\n\n"
+        f"Перепиши финальную версию ответа на исходную задачу, ИНТЕГРИРУЯ "
+        f"информацию от коллег. В финальной версии НЕ упоминай других агентов "
+        f"(никаких \"@Милена\" или \"Александр сказал\") — просто используй полученные данные. "
+        f"Стиль и формат — твой обычный."
+    )
+    try:
+        final = await run_session(speaker_id, refine_task,
+                                  on_chunk=None, agent_name=speaker_name)
+        return _finalize(final), [n for n, _ in consultations]
+    except Exception as e:
+        log.warning("[%s] re-finalize after consult failed: %s", speaker_name, e)
+        return first_draft, [n for n, _ in consultations]
+
+
+async def _critic_check_and_redo(
+    agent_name: str, agent_id: str, original_task: str, current_answer: str,
+    *, max_iters: int = 2,
+) -> tuple[str, int]:
+    """Quiet Critic check on an existing answer; if rejected, the original
+    agent redoes once with critic's notes. Up to `max_iters` redo cycles.
+    Returns (final_answer, n_iters_done) — n_iters_done counts how many
+    Critic-driven rewrites happened (0 means accepted on first check)."""
+    critic_id = AGENT_IDS.get("critic")
+    if not critic_id:
+        return current_answer, 0
+
+    answer = current_answer
+    for i in range(max_iters):
+        critic_prompt = (
+            f"Исходная задача:\n{original_task}\n\n"
+            f"Ответ агента:\n{answer}\n\n"
+            f"Проверь по своим критериям. Конкретные пункты что исправить если есть. "
+            f"В конце обязательно строка \"ВЕРДИКТ: ПРИНЯТО\" или \"ВЕРДИКТ: ДОРАБОТАТЬ\"."
+        )
+        try:
+            critic_text = await run_session(
+                critic_id, critic_prompt, on_chunk=None,
+                agent_name="critic", attach_memory=False)
+        except Exception as e:
+            log.warning("critic check failed: %s", e)
+            return answer, i
+        verdict = _parse_critic_verdict(critic_text)
+        log.info("[review %s] iter %d → %s", agent_name, i + 1, verdict)
+        if verdict == "APPROVED":
+            return answer, i
+
+        redo_task = (
+            f"{original_task}\n\n"
+            f"--- Замечания Critic к предыдущей версии ---\n"
+            f"{_finalize(critic_text).strip()[:1500]}\n"
+            f"--- Конец замечаний ---\n"
+            f"Перепиши учитывая ВСЕ замечания. Не повторяй прежних ошибок."
+        )
+        try:
+            new_answer = await run_session(
+                agent_id, redo_task, on_chunk=None, agent_name=agent_name)
+            answer = _finalize(new_answer)
+        except Exception as e:
+            log.warning("redo failed: %s", e)
+            return answer, i
+
+    return answer, max_iters
+
+
 async def _spawn_followup(speaker: str, target: str, last_answer: str,
                            chat_id: int, depth: int) -> None:
     """In-process: run `target` agent to respond to a mention by `speaker`.
@@ -882,26 +1015,39 @@ async def execute_agent(target_name: str, task: str, chat_id: int) -> None:
         log.warning("execute_agent: cannot post to chat %s: %s", chat_id, e)
         return
 
-    review_footer = ""
+    async def _set_status(s: str):
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id, message_id=placeholder.message_id,
+                text=f"{label}\n{s}",
+            )
+        except Exception:
+            pass
+
+    consulted: list[str] = []
+    review_iters = 0
     try:
+        # 1) First draft
+        await _set_status("работаю над черновиком…")
+        draft = await run_session(target_id, task, on_chunk=None,
+                                  agent_name=target_name)
+        draft = _finalize(draft)
+
+        # 2) Silent collaboration if the draft addresses other agents
+        improved = draft
+        if _find_agent_mentions(draft, exclude=target_name):
+            await _set_status("консультируюсь с коллегами…")
+            improved, consulted = await _consult_and_refine(
+                target_name, target_id, task, draft)
+
+        # 3) Quiet Critic check + redo if needed (writer/dev/analyst only)
         if (target_name in AGENTS_REVIEWED_BY_CRITIC
                 and AGENT_IDS.get("critic")):
-            # Quiet review: status hints update one placeholder, only the
-            # final polished answer is posted as a real message.
-            async def _status(s: str):
-                try:
-                    await bot.edit_message_text(
-                        chat_id=chat_id, message_id=placeholder.message_id,
-                        text=f"{label}\n{s}",
-                    )
-                except Exception:
-                    pass
-            final, history = await run_with_critic_review(
-                target_name, target_id, task, status_cb=_status)
-            review_footer = _format_review_footer(history)
+            await _set_status("проверяет Critic…")
+            final, review_iters = await _critic_check_and_redo(
+                target_name, target_id, task, improved)
         else:
-            final = await run_session(target_id, task, on_chunk=None,
-                                      agent_name=target_name)
+            final = improved
     except Exception as e:
         log.exception("execute_agent: session failed for %s", target_name)
         try:
@@ -913,16 +1059,23 @@ async def execute_agent(target_name: str, task: str, chat_id: int) -> None:
             pass
         return
 
-    final = _finalize(final) + review_footer
+    final = _finalize(final)
+    footer_bits: list[str] = []
+    if consulted:
+        names = ", ".join(
+            AGENTS_BY_NAME[c].display if AGENTS_BY_NAME.get(c) else c
+            for c in consulted
+        )
+        footer_bits.append(f"↻ консультация: {names}")
+    if review_iters >= 1:
+        footer_bits.append(f"↻ доработано после Critic ({review_iters})")
+    if footer_bits:
+        final = final + "\n\n" + "  •  ".join(footer_bits)
+
     await send_long(bot, chat_id, f"{label}\n{final}",
                     first_message=placeholder)
     asyncio.create_task(record_task(target_name, chat_id,
                                     task=task, result=final))
-
-    # Cross-agent @-mentions: if the answer addresses someone, run them too
-    for nxt in _find_agent_mentions(final, exclude=target_name)[:1]:
-        asyncio.create_task(
-            _spawn_followup(target_name, nxt, final, chat_id, depth=1))
 
 
 # ----------------------------------------------------------- project pipeline
@@ -1331,41 +1484,59 @@ async def _handle_group_message(meta: AgentMeta, agent_id: str, msg, user_text: 
             pass
 
     bot_for_send = BOTS.get(meta.name) or thinking.get_bot()
-    review_footer = ""
+
+    async def _set_status(s: str):
+        try:
+            await thinking.edit_text(header + f"<i>{_html_escape(s)}</i>",
+                                     parse_mode="HTML")
+        except Exception:
+            pass
+
+    consulted: list[str] = []
+    review_iters = 0
     try:
+        await _set_status("работаю над черновиком…")
+        draft = await run_session(agent_id, task, on_chunk=None,
+                                  agent_name=meta.name)
+        draft = _finalize(draft)
+
+        improved = draft
+        if _find_agent_mentions(draft, exclude=meta.name):
+            await _set_status("консультируюсь с коллегами…")
+            improved, consulted = await _consult_and_refine(
+                meta.name, agent_id, task, draft)
+
         if (meta.name in AGENTS_REVIEWED_BY_CRITIC
                 and AGENT_IDS.get("critic")):
-            async def _status(s: str):
-                try:
-                    await thinking.edit_text(
-                        header + f"<i>{_html_escape(s)}</i>",
-                        parse_mode="HTML",
-                    )
-                except Exception:
-                    pass
-            final, history = await run_with_critic_review(
-                meta.name, agent_id, task, status_cb=_status)
-            review_footer = _format_review_footer(history)
+            await _set_status("проверяет Critic…")
+            final, review_iters = await _critic_check_and_redo(
+                meta.name, agent_id, task, improved)
         else:
-            final = await run_session(agent_id, task, on_chunk,
-                                      agent_name=meta.name)
+            final = improved
     except Exception as e:
         log.exception("specialist group session failed for %s", meta.name)
         await thinking.edit_text(header + f"⚠️ Ошибка: <code>{type(e).__name__}: {e}</code>",
                                  parse_mode="HTML")
         return
 
-    final = _finalize(final) + review_footer
+    final = _finalize(final)
+    footer_bits: list[str] = []
+    if consulted:
+        names = ", ".join(
+            AGENTS_BY_NAME[c].display if AGENTS_BY_NAME.get(c) else c
+            for c in consulted
+        )
+        footer_bits.append(f"↻ консультация: {names}")
+    if review_iters >= 1:
+        footer_bits.append(f"↻ доработано после Critic ({review_iters})")
+    if footer_bits:
+        final = final + "\n\n" + "  •  ".join(footer_bits)
+
     await send_long(bot_for_send, msg.chat.id,
                     header + _html_escape(final),
                     first_message=thinking, parse_mode="HTML")
     asyncio.create_task(record_task(meta.name, msg.chat.id,
                                     task=task, result=final))
-
-    # Cross-agent @-mention follow-up
-    for nxt in _find_agent_mentions(final, exclude=meta.name)[:1]:
-        asyncio.create_task(
-            _spawn_followup(meta.name, nxt, final, msg.chat.id, depth=1))
 
 
 # ------------------------------------------------------- per-bot handlers
