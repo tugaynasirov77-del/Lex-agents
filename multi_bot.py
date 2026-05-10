@@ -151,6 +151,123 @@ FEEDBACK_TTL_SEC = 30 * 60   # feedback only applies if last task < 30 min ago
 RUN_SESSION_TIMEOUT_S = 60     # whole-operation timeout per user message
 TIMEOUT_FALLBACK_TEXT = "⏱ Агент не отвечает, попробуй ещё раз"
 
+# Agents whose answers get an automatic Critic review pass.
+AGENTS_REVIEWED_BY_CRITIC = {"content_writer", "dev_agent", "analyst"}
+MAX_REVIEW_ITERS = 3
+_VERDICT_RE = re.compile(
+    r"(?:ВЕРДИКТ|VERDICT)\s*[:\-—]\s*"
+    r"(ПРИНЯТО|ДОРАБОТАТЬ|APPROVED|NEEDS[\s_]+REVISION)",
+    re.IGNORECASE,
+)
+
+
+def _parse_critic_verdict(text: str) -> str:
+    m = _VERDICT_RE.search(text or "")
+    if not m:
+        return "UNKNOWN"
+    v = m.group(1).upper().replace(" ", "_")
+    return "APPROVED" if v in ("ПРИНЯТО", "APPROVED") else "NEEDS_REVISION"
+
+
+async def run_with_critic_review(
+    agent_name: str, agent_id: str, original_task: str,
+    *, status_cb=None, max_iters: int = MAX_REVIEW_ITERS,
+) -> tuple[str, list[dict]]:
+    """Run agent → Critic → maybe redo loop.
+
+    Returns (final_text, history) where history records each iteration:
+      {iter, verdict, critic_note}.
+    Critic itself does not post anywhere — only the final answer reaches
+    the user.
+    """
+    critic_id = AGENT_IDS.get("critic")
+    history: list[dict] = []
+    last_answer = ""
+    last_critic_note = ""
+
+    for i in range(1, max_iters + 1):
+        if i == 1:
+            cur_task = original_task
+        else:
+            cur_task = (
+                f"{original_task}\n\n"
+                f"--- Замечания Critic к предыдущей версии ---\n"
+                f"{last_critic_note}\n"
+                f"--- Конец замечаний ---\n"
+                f"Перепиши ответ с учётом этих замечаний. Не игнорируй ни одно."
+            )
+        if status_cb:
+            try:
+                await status_cb(f"итерация {i}/{max_iters}: работаю…")
+            except Exception:
+                pass
+
+        try:
+            last_answer = await run_session(
+                agent_id, cur_task, on_chunk=None, agent_name=agent_name)
+        except Exception as e:
+            log.exception("[%s] review iter %d agent run failed", agent_name, i)
+            history.append({"iter": i, "verdict": "AGENT_FAIL",
+                            "critic_note": str(e)})
+            break
+
+        # Last iteration — accept whatever we have
+        if not critic_id or i == max_iters:
+            history.append({"iter": i,
+                            "verdict": "NO_CRITIC" if not critic_id else "FINAL",
+                            "critic_note": ""})
+            break
+
+        if status_cb:
+            try:
+                await status_cb(f"итерация {i}/{max_iters}: проверяет Critic…")
+            except Exception:
+                pass
+
+        critic_prompt = (
+            f"Исходная задача:\n{original_task}\n\n"
+            f"Ответ агента:\n{last_answer}\n\n"
+            f"Проверь по своим критериям. В конце обязательно строка "
+            f"\"ВЕРДИКТ: ПРИНЯТО\" или \"ВЕРДИКТ: ДОРАБОТАТЬ\". "
+            f"Если ДОРАБОТАТЬ — сформулируй конкретные пункты что исправить."
+        )
+        try:
+            critic_text = await run_session(
+                critic_id, critic_prompt, on_chunk=None,
+                agent_name="critic", attach_memory=False)
+        except Exception as e:
+            log.exception("[critic] iter %d failed", i)
+            history.append({"iter": i, "verdict": "CRITIC_FAIL",
+                            "critic_note": str(e)})
+            break
+
+        verdict = _parse_critic_verdict(critic_text)
+        history.append({"iter": i, "verdict": verdict,
+                        "critic_note": critic_text})
+        log.info("[review %s] iter %d → %s", agent_name, i, verdict)
+
+        if verdict == "APPROVED":
+            break
+        last_critic_note = critic_text.strip()[:1500]
+
+    return (last_answer or "(пустой ответ)"), history
+
+
+def _format_review_footer(history: list[dict]) -> str:
+    if not history:
+        return ""
+    last = history[-1]
+    n = len(history)
+    if last["verdict"] == "APPROVED" and n == 1:
+        return ""
+    if last["verdict"] == "APPROVED":
+        return f"\n\n↻ принято Critic с {n}-й итерации"
+    if last["verdict"] == "NO_CRITIC":
+        return ""
+    if last["verdict"] in ("CRITIC_FAIL", "AGENT_FAIL"):
+        return f"\n\n↻ {n} итераций (Critic недоступен)"
+    return f"\n\n↻ Critic не одобрил после {n} итераций — отдаю последнюю версию"
+
 
 async def _run_session_impl(agent_id: str, user_text: str, on_chunk,
                             *, agent_name: Optional[str] = None,
@@ -530,9 +647,24 @@ async def execute_agent(target_name: str, task: str, chat_id: int) -> None:
         log.warning("execute_agent: cannot post to chat %s: %s", chat_id, e)
         return
 
+    review_footer = ""
     try:
-        final = await run_session(target_id, task, on_chunk=None,
-                                  agent_name=target_name)
+        if (target_name in AGENTS_REVIEWED_BY_CRITIC
+                and AGENT_IDS.get("critic")):
+            async def _status(s: str):
+                try:
+                    await bot.edit_message_text(
+                        chat_id=chat_id, message_id=placeholder.message_id,
+                        text=f"{label}\n{s}",
+                    )
+                except Exception:
+                    pass
+            final, history = await run_with_critic_review(
+                target_name, target_id, task, status_cb=_status)
+            review_footer = _format_review_footer(history)
+        else:
+            final = await run_session(target_id, task, on_chunk=None,
+                                      agent_name=target_name)
     except Exception as e:
         log.exception("execute_agent: session failed for %s", target_name)
         try:
@@ -544,7 +676,7 @@ async def execute_agent(target_name: str, task: str, chat_id: int) -> None:
             pass
         return
 
-    final = _finalize(final)
+    final = _finalize(final) + review_footer
     await send_long(bot, chat_id, f"{label}\n{final}",
                     first_message=placeholder)
     asyncio.create_task(record_task(target_name, chat_id,
@@ -1253,16 +1385,31 @@ def make_handlers(meta: AgentMeta, agent_id: str):
             except Exception:
                 pass
 
+        review_footer = ""
         try:
-            final = await run_session(agent_id, user_text, on_chunk,
-                                      agent_name=meta.name)
+            if (meta.name in AGENTS_REVIEWED_BY_CRITIC
+                    and AGENT_IDS.get("critic")):
+                async def _status(s: str):
+                    try:
+                        await thinking.edit_text(
+                            header + f"<i>{_html_escape(s)}</i>",
+                            parse_mode="HTML",
+                        )
+                    except Exception:
+                        pass
+                final, history = await run_with_critic_review(
+                    meta.name, agent_id, user_text, status_cb=_status)
+                review_footer = _format_review_footer(history)
+            else:
+                final = await run_session(agent_id, user_text, on_chunk,
+                                          agent_name=meta.name)
         except Exception as e:
             log.exception("session failed for %s", meta.name)
             await thinking.edit_text(header + f"⚠️ Ошибка: <code>{type(e).__name__}: {e}</code>",
                                      parse_mode="HTML")
             return
 
-        final = _finalize(final)
+        final = _finalize(final) + review_footer
         bot_for_send = BOTS.get(meta.name) or thinking.get_bot()
         await send_long(bot_for_send, msg.chat.id,
                         header + _html_escape(final),
