@@ -69,12 +69,12 @@ class AgentMeta:
 
 
 AGENTS: list[AgentMeta] = [
-    AgentMeta("orchestrator", "🎯", "Orchestrator", "Андрей Оркестратор", "TELEGRAM_ORCHESTRATOR_TOKEN",
+    AgentMeta("orchestrator", "🎯", "Orchestrator", "Алексей Оркестратор", "TELEGRAM_ORCHESTRATOR_TOKEN",
               "Координатор команды. Анализирует задачу и решает кому её делегировать.",
               "Я — координатор. Опиши задачу одним сообщением — отвечу JSON-разбором: "
               "какому агенту это лучше отдать, с каким приоритетом и контекстом.\n"
               "/team — список всех агентов с их @username."),
-    AgentMeta("researcher", "🔍", "Researcher", "Милена Маркетолог", "TELEGRAM_RESEARCHER_TOKEN",
+    AgentMeta("researcher", "🔍", "Researcher", "Милана Маркетолог", "TELEGRAM_RESEARCHER_TOKEN",
               "Аналитик и сборщик данных по Telegram, СНГ-рынку, инфопродуктам.",
               "Работаю по схеме: Факты → Инсайты → Рекомендации.\n"
               "Пиши задачу на исследование (конкуренты, ниша, тренд) — отвечу со ссылками."),
@@ -255,14 +255,14 @@ async def run_with_critic_review(
 
 # Triggers for "Алина, …" / "Михаил, …" style addresses in group.
 NAMED_TRIGGERS: dict[str, tuple[str, ...]] = {
-    "researcher":     ("милена", "milena"),
+    "researcher":     ("милана", "milana"),
     "strategist":     ("александр", "саша", "alex"),
     "content_writer": ("алина", "alina"),
     "dev_agent":      ("михаил", "миша", "michael"),
     "analyst":        ("николай", "коля", "nikolay"),
     "sales_agent":    ("виктор", "victor"),
     "critic":         ("аркадий", "arkadiy", "критик", "critic", "qa"),
-    "orchestrator":   ("оркестратор", "orchestrator", "андрей"),
+    "orchestrator":   ("оркестратор", "orchestrator", "алексей"),
 }
 
 # total wall-clock budget for one group dialog (orchestrator → target →
@@ -506,7 +506,7 @@ async def _consult_and_refine(
         f"--- Ответы коллег по твоим вопросам ---\n{digest}\n--- Конец ---\n\n"
         f"Перепиши финальную версию ответа на исходную задачу, ИНТЕГРИРУЯ "
         f"информацию от коллег. В финальной версии НЕ упоминай других агентов "
-        f"(никаких \"@Милена\" или \"Александр сказал\") — просто используй полученные данные. "
+        f"(никаких \"@Милана\" или \"Александр сказал\") — просто используй полученные данные. "
         f"Стиль и формат — твой обычный."
     )
     try:
@@ -724,8 +724,8 @@ async def run_session(agent_id: str, user_text: str, on_chunk,
 # ----------------------------------------------------------- greetings
 
 GREETINGS: dict[str, str] = {
-    "orchestrator":   "🎯 Андрей Оркестратор здесь.\nКоординирую команду — кидай любую задачу, я разберусь кому передать.",
-    "researcher":     "🔍 Милена на связи.\nАнализирую конкурентов, исследую ниши, ищу данные.",
+    "orchestrator":   "🎯 Алексей Оркестратор здесь.\nКоординирую команду — кидай любую задачу, я разберусь кому передать.",
+    "researcher":     "🔍 Милана на связи.\nАнализирую конкурентов, исследую ниши, ищу данные.",
     "strategist":     "📐 Александр здесь.\nСтрою контент-планы, воронки и стратегии роста.",
     "content_writer": "✍️ Алина на связи.\nПишу посты, продающие тексты и скрипты для Telegram.",
     "dev_agent":      "💻 Михаил здесь.\nРазрабатываю мини-аппы, ботов и интеграции.",
@@ -1251,12 +1251,12 @@ async def _run_pipeline(chat_id: int, project_text: str) -> None:
     plan = (
         f"🚀 Новый проект: {name}\n\n"
         "План работы команды:\n"
-        "1️⃣ 🔍 Милена — анализ ниши и конкурентов\n"
+        "1️⃣ 🔍 Милана — анализ ниши и конкурентов\n"
         "2️⃣ 📐 Александр — стратегия и контент-план\n"
         "3️⃣ ✍️ Алина — 3 первых поста\n"
         "4️⃣ 📊 Николай — KPI и метрики\n"
         "5️⃣ 🛡 Аркадий — проверка результатов\n"
-        "6️⃣ 🎯 Андрей — итоговое резюме\n\n"
+        "6️⃣ 🎯 Алексей — итоговое резюме\n\n"
         "Поехали…"
     )
     await _post_via("orchestrator", chat_id, plan)
@@ -1272,7 +1272,7 @@ async def _run_pipeline(chat_id: int, project_text: str) -> None:
 
         # Step 6 — orchestrator final summary (rendered by content_writer agent
         # because the orchestrator agent's system prompt forces JSON output;
-        # we still post via the orchestrator bot under "Андрей Оркестратор").
+        # we still post via the orchestrator bot under "Алексей Оркестратор").
         if not state["cancel"].is_set():
             state["current_step"] = 6
             state["current_agent"] = "orchestrator"
@@ -1289,9 +1289,9 @@ async def _run_pipeline(chat_id: int, project_text: str) -> None:
                 "Сформируй ИТОГ ПРОЕКТА в виде ОБЫЧНОГО ЧИТАЕМОГО ТЕКСТА "
                 "(никакого JSON, никаких кодовых блоков). "
                 "Используй ровно этот шаблон, заполни его по существу:\n\n"
-                f"🎯 Андрей Оркестратор — Итог проекта {name}:\n\n"
+                f"🎯 Алексей Оркестратор — Итог проекта {name}:\n\n"
                 "📋 Что сделано:\n"
-                "- Милена: 1–2 строки сути её анализа\n"
+                "- Милана: 1–2 строки сути её анализа\n"
                 "- Александр: 1–2 строки сути стратегии\n"
                 "- Алина: 1–2 строки про посты\n"
                 "- Николай: 1–2 строки про метрики\n\n"
@@ -1320,7 +1320,7 @@ async def _run_pipeline(chat_id: int, project_text: str) -> None:
             # Ensure the canonical header is on top regardless of what the model returned
             header_re = re.compile(r"^\s*🎯[^\n]*Итог проекта[^\n]*\n+", re.IGNORECASE)
             body_text = header_re.sub("", summary, count=1).strip()
-            final_text = (f"🎯 Андрей Оркестратор — Итог проекта {name}:\n\n"
+            final_text = (f"🎯 Алексей Оркестратор — Итог проекта {name}:\n\n"
                           f"{body_text}")
             orch_bot = BOTS.get("orchestrator")
             if orch_bot:
@@ -1882,7 +1882,7 @@ _AGENT_KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
                          "оффер", "лендинг", "writer", "copywriter", "алина",
                          "сторителлинг", "сценарий", "caption", "статья")),
     ("researcher",     ("исследов", "конкурент", "анализ ниши", "researcher",
-                         "милена", "ниша", "тренд", "data", "статистика",
+                         "милана", "ниша", "тренд", "data", "статистика",
                          "рынок", "market")),
     ("strategist",     ("стратег", "стратегия", "стратегию", "strategy", "план",
                          "плана", "плану", "планирование", "roadmap", "gtm", "канвас",
@@ -1979,7 +1979,7 @@ _AGENT_ALIAS: dict[str, str] = {
     "копирайтер": "content_writer", "алина": "content_writer",
     "dev": "dev_agent", "developer": "dev_agent",
     "разработчик": "dev_agent", "михаил": "dev_agent", "миша": "dev_agent",
-    "milena": "researcher", "милена": "researcher",
+    "milana": "researcher", "милана": "researcher",
     "research": "researcher", "researcher_agent": "researcher",
     "александр": "strategist", "alex": "strategist", "стратег": "strategist",
     "николай": "analyst", "nikolay": "analyst", "аналитик": "analyst",
