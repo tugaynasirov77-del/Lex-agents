@@ -253,6 +253,241 @@ async def run_with_critic_review(
     return (last_answer or "(пустой ответ)"), history
 
 
+# Triggers for "Алина, …" / "Михаил, …" style addresses in group.
+NAMED_TRIGGERS: dict[str, tuple[str, ...]] = {
+    "researcher":     ("милена", "milena"),
+    "strategist":     ("александр", "саша", "alex"),
+    "content_writer": ("алина", "alina"),
+    "dev_agent":      ("михаил", "миша", "michael"),
+    "analyst":        ("николай", "коля", "nikolay"),
+    "sales_agent":    ("виктор", "victor"),
+    "critic":         ("критик", "critic", "qa"),
+    "orchestrator":   ("оркестратор", "orchestrator", "андрей"),
+}
+
+# total wall-clock budget for one group dialog (orchestrator → target →
+# critic loop → cross-agent follow-ups)
+GROUP_DIALOG_TIMEOUT_S = 300
+MAX_FOLLOWUP_DEPTH = 2
+
+
+def _find_agent_mentions(text: str, exclude: Optional[str] = None) -> list[str]:
+    """Return canonical agent names referenced inside `text`.
+
+    Recognises:
+      • @username from TEAM_REGISTRY  (e.g. @Alina_write1_bot)
+      • named addresses followed by punctuation/space ("Алина, ...", "Михаил —")
+    `exclude` — speaker's own name; never returned.
+    """
+    if not text:
+        return []
+    lower = text.lower()
+    found: list[str] = []
+
+    # @-style mentions
+    for name, handle in TEAM_REGISTRY.items():
+        if handle and handle.lower() in lower and name not in found:
+            found.append(name)
+
+    # named addresses — only when followed by , ; : . — - space
+    for name, kws in NAMED_TRIGGERS.items():
+        if name in found:
+            continue
+        for kw in kws:
+            pat = rf"(?<![\wа-яё]){re.escape(kw)}\s*[,:;.\-—]"
+            if re.search(pat, lower):
+                found.append(name)
+                break
+
+    if exclude:
+        found = [n for n in found if n != exclude]
+    return found
+
+
+async def _post_status(bot, chat_id: int, message, text: str,
+                        parse_mode: Optional[str] = None) -> None:
+    """Edit `message` with `text`, swallow errors."""
+    if message is None:
+        return
+    try:
+        await bot.edit_message_text(
+            text=text, chat_id=chat_id,
+            message_id=message.message_id, parse_mode=parse_mode,
+        )
+    except Exception:
+        pass
+
+
+async def run_with_critic_review_public(
+    target_name: str, target_id: str, original_task: str,
+    chat_id: int, target_placeholder, target_bot,
+    *, max_iters: int = MAX_REVIEW_ITERS,
+) -> tuple[str, str]:
+    """Public review loop — Critic posts in the group between iterations.
+
+    Returns (final_answer, footer_marker).
+    """
+    target_meta = AGENTS_BY_NAME[target_name]
+    label = f"{target_meta.emoji} {target_meta.display}:"
+    critic_id = AGENT_IDS.get("critic")
+    critic_bot = BOTS.get("critic")
+
+    last_answer = ""
+    last_critic_note = ""
+    pending_placeholder = target_placeholder   # for iter 1 we edit; later we send new
+    last_iter = 0
+
+    for i in range(1, max_iters + 1):
+        last_iter = i
+        # Status: agent working
+        if pending_placeholder:
+            status = (f"{label}\n🔄 работаю…" if i == 1
+                      else f"{label}\n🔄 итерация {i}/{max_iters} — переделываю…")
+            await _post_status(target_bot, chat_id, pending_placeholder, status)
+
+        cur_task = original_task if i == 1 else (
+            f"{original_task}\n\n"
+            f"--- Замечания Critic к предыдущей версии ---\n"
+            f"{last_critic_note}\n"
+            f"--- Конец замечаний ---\n"
+            f"Перепиши учитывая ВСЕ замечания. Не повторяй прежних ошибок."
+        )
+
+        try:
+            answer = await run_session(target_id, cur_task,
+                                       on_chunk=None, agent_name=target_name)
+        except Exception as e:
+            log.exception("[review %s] iter %d agent failed", target_name, i)
+            answer = f"⚠️ Ошибка: {type(e).__name__}: {e}"
+
+        last_answer = _finalize(answer)
+        body = last_answer if len(last_answer) < 3800 else last_answer[:3800] + "…"
+        msg_text = (f"{label}\n{body}" if i == 1
+                    else f"{label} (итерация {i}/{max_iters})\n{body}")
+        if pending_placeholder:
+            await _post_status(target_bot, chat_id, pending_placeholder, msg_text)
+            pending_placeholder = None
+        else:
+            try:
+                await target_bot.send_message(chat_id=chat_id, text=msg_text)
+            except Exception:
+                pass
+
+        # No critic available, or last iteration — stop here
+        if not critic_id or not critic_bot or i == max_iters:
+            break
+
+        # Status: handing off to Critic via the agent's own placeholder is gone;
+        # post a short transition message from the agent's bot
+        try:
+            await target_bot.send_message(
+                chat_id=chat_id,
+                text=f"{label} ✅ готово, передаю Критику")
+        except Exception:
+            pass
+
+        critic_prompt = (
+            f"Исходная задача:\n{original_task}\n\n"
+            f"Ответ {target_meta.display}:\n{last_answer}\n\n"
+            f"Проверь по своим критериям. Конкретные пункты что исправить если есть. "
+            f"В конце обязательно строка \"ВЕРДИКТ: ПРИНЯТО\" или \"ВЕРДИКТ: ДОРАБОТАТЬ\"."
+        )
+        critic_placeholder = None
+        try:
+            critic_placeholder = await critic_bot.send_message(
+                chat_id=chat_id, text="🛡 Критик: проверяю…")
+        except Exception:
+            pass
+
+        try:
+            critic_text = await run_session(
+                critic_id, critic_prompt, on_chunk=None,
+                agent_name="critic", attach_memory=False)
+        except Exception as e:
+            log.exception("[critic] iter %d failed", i)
+            critic_text = f"⚠️ Ошибка проверки: {type(e).__name__}: {e}\nВЕРДИКТ: ПРИНЯТО"
+
+        critic_text = _finalize(critic_text)
+        verdict = _parse_critic_verdict(critic_text)
+        critic_body = critic_text if len(critic_text) < 3800 else critic_text[:3800] + "…"
+        await _post_status(critic_bot, chat_id, critic_placeholder,
+                           f"🛡 Критик:\n{critic_body}")
+
+        if verdict == "APPROVED":
+            break
+
+        last_critic_note = critic_text.strip()[:1500]
+        # Open a new placeholder for the agent's next iteration
+        try:
+            pending_placeholder = await target_bot.send_message(
+                chat_id=chat_id,
+                text=f"{label}\n🔄 учитываю замечания…")
+        except Exception:
+            pending_placeholder = None
+
+    # Footer marker
+    if last_iter <= 1:
+        footer = ""
+    elif last_iter < max_iters or critic_id is None:
+        footer = ""   # text is already labelled with "(итерация N/M)"
+    else:
+        footer = ""
+    return last_answer, footer
+
+
+async def _spawn_followup(speaker: str, target: str, last_answer: str,
+                           chat_id: int, depth: int) -> None:
+    """In-process: run `target` agent to respond to a mention by `speaker`.
+    Recurses up to MAX_FOLLOWUP_DEPTH then stops."""
+    if depth >= MAX_FOLLOWUP_DEPTH:
+        log.info("follow-up cap reached (depth=%d): %s→%s", depth, speaker, target)
+        return
+    if target == speaker or target == "orchestrator":
+        return
+    target_meta = AGENTS_BY_NAME.get(target)
+    target_bot = BOTS.get(target)
+    target_id = AGENT_IDS.get(target)
+    if not (target_meta and target_bot and target_id):
+        log.info("follow-up skipped: %s not available", target)
+        return
+
+    speaker_meta = AGENTS_BY_NAME.get(speaker)
+    speaker_label = speaker_meta.display if speaker_meta else speaker
+    label = f"{target_meta.emoji} {target_meta.display}:"
+
+    placeholder = None
+    try:
+        placeholder = await target_bot.send_message(
+            chat_id=chat_id, text=f"{label}\nотвечаю на упоминание…")
+    except Exception as e:
+        log.warning("follow-up cannot post: %s", e)
+        return
+
+    task = (
+        f"В групповом чате к тебе обратился(-лась) {speaker_label}. "
+        f"Их сообщение:\n---\n{last_answer.strip()[:1800]}\n---\n"
+        f"Ответь конкретно по сути обращения. Без воды. 3–8 строк."
+    )
+    try:
+        answer = await run_session(target_id, task, on_chunk=None,
+                                   agent_name=target)
+    except Exception as e:
+        log.exception("follow-up %s failed", target)
+        await _post_status(target_bot, chat_id, placeholder,
+                           f"{label}\n⚠️ {type(e).__name__}: {e}")
+        return
+
+    answer = _finalize(answer)
+    body = answer if len(answer) < 3800 else answer[:3800] + "…"
+    await _post_status(target_bot, chat_id, placeholder, f"{label}\n{body}")
+
+    # Cascade — but tighter (no nested critic loop, only mention chain)
+    nested = _find_agent_mentions(answer, exclude=target)
+    for n in nested[:1]:        # only first mention to limit fan-out
+        asyncio.create_task(
+            _spawn_followup(target, n, answer, chat_id, depth + 1))
+
+
 def _format_review_footer(history: list[dict]) -> str:
     if not history:
         return ""
@@ -648,9 +883,19 @@ async def execute_agent(target_name: str, task: str, chat_id: int) -> None:
         return
 
     review_footer = ""
+    used_public_review = False
     try:
         if (target_name in AGENTS_REVIEWED_BY_CRITIC
+                and AGENT_IDS.get("critic") and BOTS.get("critic")):
+            # Group context with critic available → public dialog
+            final, review_footer = await run_with_critic_review_public(
+                target_name, target_id, task,
+                chat_id, placeholder, bot,
+            )
+            used_public_review = True
+        elif (target_name in AGENTS_REVIEWED_BY_CRITIC
                 and AGENT_IDS.get("critic")):
+            # Critic agent exists but its bot isn't running — silent loop
             async def _status(s: str):
                 try:
                     await bot.edit_message_text(
@@ -677,10 +922,19 @@ async def execute_agent(target_name: str, task: str, chat_id: int) -> None:
         return
 
     final = _finalize(final) + review_footer
-    await send_long(bot, chat_id, f"{label}\n{final}",
-                    first_message=placeholder)
+    if not used_public_review:
+        # Public review already posted the answer in iterations; only post here
+        # for the simple/silent paths.
+        await send_long(bot, chat_id, f"{label}\n{final}",
+                        first_message=placeholder)
+
     asyncio.create_task(record_task(target_name, chat_id,
                                     task=task, result=final))
+
+    # Cross-agent @-mentions: if the answer addresses someone, run them too
+    for nxt in _find_agent_mentions(final, exclude=target_name)[:1]:
+        asyncio.create_task(
+            _spawn_followup(target_name, nxt, final, chat_id, depth=1))
 
 
 # ----------------------------------------------------------- project pipeline
@@ -1088,22 +1342,47 @@ async def _handle_group_message(meta: AgentMeta, agent_id: str, msg, user_text: 
         except Exception:
             pass
 
+    bot_for_send = BOTS.get(meta.name) or thinking.get_bot()
+    review_footer = ""
+    used_public_review = False
     try:
-        final = await run_session(agent_id, task, on_chunk,
-                                  agent_name=meta.name)
+        if (meta.name in AGENTS_REVIEWED_BY_CRITIC
+                and AGENT_IDS.get("critic") and BOTS.get("critic")):
+            # Strip HTML — public review path posts plain text via bots
+            plain_label_msg = await bot_for_send.send_message(
+                chat_id=msg.chat.id,
+                text=f"{meta.emoji} {meta.display}:\n🔄 работаю…",
+            )
+            try:
+                await thinking.delete()
+            except Exception:
+                pass
+            final, review_footer = await run_with_critic_review_public(
+                meta.name, agent_id, task,
+                msg.chat.id, plain_label_msg, bot_for_send,
+            )
+            used_public_review = True
+        else:
+            final = await run_session(agent_id, task, on_chunk,
+                                      agent_name=meta.name)
     except Exception as e:
         log.exception("specialist group session failed for %s", meta.name)
         await thinking.edit_text(header + f"⚠️ Ошибка: <code>{type(e).__name__}: {e}</code>",
                                  parse_mode="HTML")
         return
 
-    final = _finalize(final)
-    bot_for_send = BOTS.get(meta.name) or thinking.get_bot()
-    await send_long(bot_for_send, msg.chat.id,
-                    header + _html_escape(final),
-                    first_message=thinking, parse_mode="HTML")
+    final = _finalize(final) + review_footer
+    if not used_public_review:
+        await send_long(bot_for_send, msg.chat.id,
+                        header + _html_escape(final),
+                        first_message=thinking, parse_mode="HTML")
     asyncio.create_task(record_task(meta.name, msg.chat.id,
                                     task=task, result=final))
+
+    # Cross-agent @-mention follow-up
+    for nxt in _find_agent_mentions(final, exclude=meta.name)[:1]:
+        asyncio.create_task(
+            _spawn_followup(meta.name, nxt, final, msg.chat.id, depth=1))
 
 
 # ------------------------------------------------------- per-bot handlers
@@ -1241,7 +1520,19 @@ def make_handlers(meta: AgentMeta, agent_id: str):
 
         # ============== GROUP CHAT branch (non-greeting) ==============
         if is_group:
-            await _handle_group_message(meta, agent_id, msg, user_text)
+            try:
+                await asyncio.wait_for(
+                    _handle_group_message(meta, agent_id, msg, user_text),
+                    timeout=GROUP_DIALOG_TIMEOUT_S,
+                )
+            except asyncio.TimeoutError:
+                log.warning("[%s] group dialog exceeded %ds — aborted",
+                            meta.name, GROUP_DIALOG_TIMEOUT_S)
+                try:
+                    await msg.reply_text(
+                        f"⏱ Превышен лимит {GROUP_DIALOG_TIMEOUT_S // 60} мин на этот диалог.")
+                except Exception:
+                    pass
             return
 
         # ============== Below: PRIVATE chat ==============
