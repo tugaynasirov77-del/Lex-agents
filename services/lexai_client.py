@@ -67,6 +67,19 @@ def report_success(job_id: str, *, video_url: str, cover_url: str | None = None)
         raise LexAIError(f"success report failed {r.status_code}: {r.text[:200]}")
 
 
+def caption_from_transcript(*, project_id: str, draft_id: str, transcript: str) -> dict:
+    """Зовёт Алину через Mini App API. Возвращает {caption, overlays}."""
+    with httpx.Client(timeout=120.0) as client:
+        r = client.post(
+            f"{_base()}/api/ig/caption-from-transcript",
+            json={"project_id": project_id, "draft_id": draft_id, "transcript": transcript[:8000]},
+            headers=_headers(),
+        )
+    if r.status_code >= 400:
+        raise LexAIError(f"caption-from-transcript failed {r.status_code}: {r.text[:200]}")
+    return r.json()
+
+
 def report_failure(job_id: str, *, error: str) -> None:
     with httpx.Client(timeout=15.0) as client:
         r = client.post(
