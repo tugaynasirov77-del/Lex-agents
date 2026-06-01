@@ -25,7 +25,14 @@ import tempfile
 import logging
 import traceback
 
-from services import heygen_client, whisper_client, ffmpeg_processor, supabase_storage, lexai_client
+from services import (
+    heygen_client,
+    whisper_client,
+    ffmpeg_processor,
+    supabase_storage,
+    lexai_client,
+    source_downloader,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -41,9 +48,10 @@ BG_MUSIC_PATH = os.environ.get("BACKGROUND_MUSIC_PATH")  # опц. локаль�
 def process_job(job: dict) -> None:
     job_id = job["id"]
     draft_id = job["draft_id"]
-    script: str = job["script"]
+    project_id = job["project_id"]
+    mode = job.get("mode", "avatar")
     overlays = job.get("overlays") or []
-    log.info("=== job %s (draft %s) ===", job_id, draft_id)
+    log.info("=== job %s mode=%s (draft %s) ===", job_id, mode, draft_id)
 
     with tempfile.TemporaryDirectory(prefix=f"reel-{job_id[:8]}-") as tmp:
         raw_mp4 = os.path.join(tmp, "raw.mp4")
@@ -51,19 +59,41 @@ def process_job(job: dict) -> None:
         out_mp4 = os.path.join(tmp, "out.mp4")
         cover_jpg = os.path.join(tmp, "cover.jpg")
 
-        # 1) HeyGen
+        # 1) Получаем raw mp4 — либо от HeyGen, либо скачиваем загруженное клиентом
         lexai_client.report_progress(job_id, status="rendering")
-        video_id = heygen_client.create_video(script)
-        lexai_client.report_progress(job_id, heygen_video_id=video_id)
-        result = heygen_client.poll_until_ready(video_id)
-        if not result.video_url:
-            raise RuntimeError("HeyGen returned empty video_url")
-        heygen_client.download_video(result.video_url, raw_mp4)
+        if mode == "from_upload":
+            src_url = job.get("source_video_url")
+            if not src_url:
+                raise RuntimeError("from_upload job has no source_video_url")
+            source_downloader.download_source_video(src_url, raw_mp4)
+        else:
+            script: str = job.get("script") or ""
+            if not script.strip():
+                raise RuntimeError("avatar job has empty script")
+            video_id = heygen_client.create_video(script)
+            lexai_client.report_progress(job_id, heygen_video_id=video_id)
+            result = heygen_client.poll_until_ready(video_id)
+            if not result.video_url:
+                raise RuntimeError("HeyGen returned empty video_url")
+            heygen_client.download_video(result.video_url, raw_mp4)
 
-        # 2) Whisper
+        # 2) Whisper: транскрипт + SRT
         srt = whisper_client.transcribe_to_srt(raw_mp4, language="ru")
         ffmpeg_processor.write_srt(srt, srt_path)
         lexai_client.report_progress(job_id, srt_text=srt[:8000])
+
+        # 2.5) Если from_upload — Алина пишет caption + overlays по транскрипту
+        if mode == "from_upload":
+            transcript_text = "\n".join(
+                line for line in srt.splitlines()
+                if line.strip() and not line.strip().isdigit() and "-->" not in line
+            )
+            caption_resp = lexai_client.caption_from_transcript(
+                project_id=project_id,
+                draft_id=draft_id,
+                transcript=transcript_text,
+            )
+            overlays = caption_resp.get("overlays") or overlays
 
         # 3) FFmpeg
         ffmpeg_processor.render_reel(
@@ -75,7 +105,7 @@ def process_job(job: dict) -> None:
         )
         ffmpeg_processor.extract_cover(out_mp4, cover_jpg, at_second=1.5)
 
-        # 4) Upload
+        # 4) Upload готового mp4 + обложки в bucket reels
         remote_video = f"{draft_id}/reel.mp4"
         remote_cover = f"{draft_id}/cover.jpg"
         video_url = supabase_storage.upload_file(out_mp4, remote_video, content_type="video/mp4")
