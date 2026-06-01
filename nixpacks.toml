@@ -1,0 +1,6 @@
+# Railway Nixpacks конфиг.
+# Добавляем ffmpeg для воркера Reels (services/ffmpeg_processor.py).
+# fonts-dejavu — fallback font для drawtext overlays.
+
+[phases.setup]
+nixPkgs = ["ffmpeg", "dejavu_fonts"]
