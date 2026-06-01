@@ -82,22 +82,32 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 
 def _cinematic_ass(srt_text: str, out_path: str, p: StyleConfig) -> str:
-    """Cinematic 2-row layout: верхнее слово BOLD CAPS, под ним italic-accent появляется отдельным событием."""
+    """Business Mentor / Klap-style: текст СЛЕВА, группы по 4 слова в layout
+    [левый блок 2 строки] → [правый блок 2 строки]. Каждое слово появляется
+    отдельно (staggered pop-in). Последнее слово группы — жёлтым акцентом.
+    """
     events: list[str] = []
-    color_idx = 0
-    accent_colors = p.accent_colors or ["#FFD54F"]
+    accent_color = (p.accent_colors or ["#FFD54F"])[0]
+    accent_color_ass = hex_to_ass(accent_color)
+    primary_ass = hex_to_ass(p.primary_hex)
+    outline_ass = hex_to_ass(p.outline_hex)
 
-    # Координаты двух строк — компактно, впритык с лёгким зазором
-    TOP_X, TOP_Y = CANVAS_W // 2, 900
-    BOT_X, BOT_Y = CANVAS_W // 2, 1020
-    SOLO_X, SOLO_Y = CANVAS_W // 2, 960
+    # Координаты — текст по левой стороне (но если только левый блок — он сдвигается чуть правее)
+    LEFT_X = 90                # отступ от левого края
+    RIGHT_X = 640              # начало правого блока
+    Y_TOP = 830                # верхняя строка блока
+    Y_BOT = 970                # нижняя строка
+    ARROW_X = 530              # стрелка между блоками
+    ARROW_Y = 905
+    SOLO_X = 90
+    SOLO_Y_TOP = 880
+    SOLO_Y_BOT = 1010
 
-    base_font_size = int(round(CANVAS_H * p.font_size_pct / 100))
-    accent_font_size = int(round(CANVAS_H * p.font_size_pct * p.accent_size_ratio / 100))
+    font_size = int(round(CANVAS_H * p.font_size_pct / 100))
+    arrow_size = int(font_size * 0.9)
 
-    # Используем естественные тайминги Whisper БЕЗ растягивания (иначе слова отстают от голоса)
-    flat: list[tuple[str, float, float]] = []  # (word, start, end)
-
+    # Сбор плоского списка слов с whisper-таймингами (естественными, без растяжки)
+    flat: list[tuple[str, float, float]] = []
     for m in SRT_BLOCK.finditer(srt_text):
         h1, m1, s1, ms1 = int(m.group(2)), int(m.group(3)), int(m.group(4)), int(m.group(5))
         h2, m2, s2, ms2 = int(m.group(6)), int(m.group(7)), int(m.group(8)), int(m.group(9))
@@ -109,74 +119,87 @@ def _cinematic_ass(srt_text: str, out_path: str, p: StyleConfig) -> str:
         words = text.split(" ")
         duration = max(0.2, end_s - start_s)
         wt_total = sum(len(w) for w in words) or 1
-
-        block_cursor = start_s
+        cur = start_s
         for w in words:
             cleaned = _strip_punct(w)
             wd = duration * len(w) / wt_total
-            w_start = block_cursor
-            w_end = w_start + wd
-            block_cursor = w_end
+            w_start, w_end = cur, cur + wd
+            cur = w_end
             if cleaned:
                 flat.append((cleaned, w_start, w_end))
 
-    # Идём парами: 70% времени — пара (main + accent), 30% — соло
+    def word_tag(x: int, y: int, color_ass: str, *, bold: bool = True, size: int = font_size) -> str:
+        return (
+            f"\\pos({x},{y})"
+            f"\\fad(90,60)"
+            f"\\fn{p.font_name}\\b{1 if bold else 0}"
+            f"\\fs{size}"
+            f"\\1c{color_ass}"
+            f"\\3c{outline_ass}\\bord{p.outline_px}"
+            f"\\fscx86\\fscy86\\t(0,140,\\fscx100\\fscy100)"
+            f"\\an4"  # left-middle anchor (текст растёт вправо от точки)
+        )
+
+    # Идём группами по 4. Если в конце осталось <4 — рендерим как левый блок только.
     i = 0
     while i < len(flat):
-        # Пара? — если есть следующее слово и оба >2 символов
-        if i + 1 < len(flat) and len(flat[i][0]) >= 2 and len(flat[i + 1][0]) >= 3:
-            main_w, m_start, m_end = flat[i]
-            acc_w, a_start, a_end = flat[i + 1]
+        group = flat[i : i + 4]
+        i += 4
+        group_end = group[-1][2]
 
-            # TOP — main word: показываем от его начала до конца accent (висит пока появляется второе)
-            top_tags = (
-                f"\\pos({TOP_X},{TOP_Y})"
-                f"\\fad(100,80)"
-                f"\\fn{p.font_name}\\b1"
-                f"\\fs{base_font_size}"
-                f"\\1c{hex_to_ass(p.primary_hex)}"
-                f"\\3c{hex_to_ass(p.outline_hex)}\\bord{p.outline_px}"
-                f"\\fscx92\\fscy92\\t(0,140,\\fscx102\\fscy102)"
+        if len(group) >= 4:
+            # ПОЛНЫЙ layout: [w1/w2] → [w3/w4-yellow]
+            for idx, (w, w_start, _) in enumerate(group):
+                is_yellow = idx == 3
+                col = accent_color_ass if is_yellow else primary_ass
+                if idx == 0:
+                    tag = word_tag(LEFT_X, Y_TOP, col)
+                elif idx == 1:
+                    tag = word_tag(LEFT_X, Y_BOT, col)
+                elif idx == 2:
+                    tag = word_tag(RIGHT_X, Y_TOP, col)
+                else:
+                    tag = word_tag(RIGHT_X, Y_BOT, col)
+                txt = _escape_ass(w.upper())
+                events.append(f"Dialogue: 0,{_ass_time(w_start)},{_ass_time(group_end)},Active,,0,0,0,,{{{tag}}}{txt}")
+
+            # Стрелка — появляется между блоками когда стартует правый
+            arrow_start = group[2][1]
+            arrow_tag = (
+                f"\\pos({ARROW_X},{ARROW_Y})"
+                f"\\fad(80,60)"
+                f"\\fn{p.font_name}\\b1\\fs{arrow_size}"
+                f"\\1c{primary_ass}"
+                f"\\3c{outline_ass}\\bord{p.outline_px}"
+                f"\\fscx70\\fscy70\\t(0,120,\\fscx100\\fscy100)"
                 f"\\an5"
             )
-            top_text = "{" + top_tags + "}" + _escape_ass(main_w.upper())
-            events.append(f"Dialogue: 0,{_ass_time(m_start)},{_ass_time(a_end)},Active,,0,0,0,,{top_text}")
+            events.append(f"Dialogue: 0,{_ass_time(arrow_start)},{_ass_time(group_end)},Active,,0,0,0,,{{{arrow_tag}}}→")
 
-            # BOTTOM — italic accent
-            color = accent_colors[color_idx % len(accent_colors)]
-            color_idx += 1
-            color_ass = hex_to_ass(color)
-            underline = 1 if p.accent_underline else 0
-            bot_tags = (
-                f"\\pos({BOT_X},{BOT_Y})"
-                f"\\fad(120,80)"
-                f"\\fn{p.accent_font}\\i1\\u{underline}"
-                f"\\fs{accent_font_size}"
-                f"\\1c{color_ass}"
-                f"\\3c{hex_to_ass(p.outline_hex)}\\bord2"
-                f"\\fscx88\\fscy88\\t(0,170,\\fscx100\\fscy100)"
-                f"\\an5"
-            )
-            bot_text = "{" + bot_tags + "}" + _escape_ass(acc_w.lower())
-            events.append(f"Dialogue: 0,{_ass_time(a_start)},{_ass_time(a_end)},Active,,0,0,0,,{bot_text}")
+        elif len(group) == 3:
+            # 2 слова слева + 1 слово ниже жёлтым (без стрелки)
+            tags = [word_tag(LEFT_X, Y_TOP, primary_ass),
+                    word_tag(LEFT_X, Y_BOT, accent_color_ass)]
+            # Размещаем 3-е слово по центру внизу
+            tag3 = word_tag(LEFT_X, Y_BOT + 130, accent_color_ass)
+            for idx, (w, w_start, _) in enumerate(group):
+                tag = tag3 if idx == 2 else tags[idx]
+                txt = _escape_ass(w.upper())
+                events.append(f"Dialogue: 0,{_ass_time(w_start)},{_ass_time(group_end)},Active,,0,0,0,,{{{tag}}}{txt}")
 
-            i += 2
-        else:
-            # Одиночное слово по центру
-            w, w_start, w_end = flat[i]
-            solo_tags = (
-                f"\\pos({SOLO_X},{SOLO_Y})"
-                f"\\fad(100,80)"
-                f"\\fn{p.font_name}\\b1"
-                f"\\fs{base_font_size}"
-                f"\\1c{hex_to_ass(p.primary_hex)}"
-                f"\\3c{hex_to_ass(p.outline_hex)}\\bord{p.outline_px}"
-                f"\\fscx92\\fscy92\\t(0,140,\\fscx102\\fscy102)"
-                f"\\an5"
-            )
-            solo_text = "{" + solo_tags + "}" + _escape_ass(w.upper())
-            events.append(f"Dialogue: 0,{_ass_time(w_start)},{_ass_time(w_end)},Active,,0,0,0,,{solo_text}")
-            i += 1
+        elif len(group) == 2:
+            # 2 слова, второе жёлтым
+            for idx, (w, w_start, _) in enumerate(group):
+                col = accent_color_ass if idx == 1 else primary_ass
+                y = SOLO_Y_TOP if idx == 0 else SOLO_Y_BOT
+                tag = word_tag(SOLO_X, y, col)
+                txt = _escape_ass(w.upper())
+                events.append(f"Dialogue: 0,{_ass_time(w_start)},{_ass_time(group_end)},Active,,0,0,0,,{{{tag}}}{txt}")
+
+        else:  # 1 слово
+            w, w_start, _ = group[0]
+            tag = word_tag(SOLO_X, SOLO_Y_TOP, accent_color_ass)
+            events.append(f"Dialogue: 0,{_ass_time(w_start)},{_ass_time(group_end)},Active,,0,0,0,,{{{tag}}}{_escape_ass(w.upper())}")
 
     body = _build_header(p) + "\n".join(events) + "\n"
     with open(out_path, "w", encoding="utf-8") as f:

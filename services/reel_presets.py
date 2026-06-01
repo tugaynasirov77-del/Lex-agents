@@ -196,13 +196,13 @@ CINEMATIC_MENTOR = StyleConfig(
     label="Cinematic Mentor",
     description="Крупный текст по центру, italic-акценты, jump-cuts. Премиум-видеомонтаж.",
 
-    font_name="Montserrat",
-    font_size_pct=8.5,                 # 1920*0.085 ≈ 163px — крупно но читаемо
+    font_name="Montserrat Black",
+    font_size_pct=7.0,                 # 1920*0.07 ≈ 134px (text слева, 4 слова в кадре)
     bold=True,
 
     primary_hex="#FFFFFF",
     outline_hex="#000000",
-    outline_px=3,                       # минимальная обводка для clean look
+    outline_px=2,                       # очень тонкая, для clean Klap-look
     active_word_hex="#FFD54F",
     spoken_word_hex="#FFFFFF",
 
