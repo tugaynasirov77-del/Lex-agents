@@ -30,38 +30,52 @@ def write_srt(srt_text: str, path: str) -> str:
 def render_reel(
     *,
     input_video: str,
-    srt_path: str,
+    subs_path: str,
     overlays: Iterable[dict],
     music_path: str | None,
     output_path: str,
     music_volume: float = 0.08,
     font_path: str | None = None,
+    hook_zoom: bool = True,
 ) -> str:
     """Финальный рендер.
 
+    subs_path: ASS-файл (TikTok karaoke) или SRT — определяется по расширению.
     overlays: iterable of {time:int sec, text:str, duration:int sec}
+    hook_zoom: zoom-in эффект первые 2 сек для удержания внимания
     """
     if not os.path.exists(input_video):
         raise FFmpegError(f"input not found: {input_video}")
-    if not os.path.exists(srt_path):
-        raise FFmpegError(f"srt not found: {srt_path}")
+    if not os.path.exists(subs_path):
+        raise FFmpegError(f"subs not found: {subs_path}")
 
-    # Сценический ratio 9:16 1080x1920. Если HeyGen уже отдал 9:16 — просто scale.
-    # subtitles фильтр выжигает SRT в видео. force_style — белый текст, чёрная обводка.
-    style = (
-        "FontName=DejaVu Sans Bold,FontSize=18,PrimaryColour=&HFFFFFF&,"
-        "OutlineColour=&H000000&,BorderStyle=1,Outline=2,Shadow=0,"
-        "Alignment=2,MarginV=120"
-    )
-    # ВАЖНО: путь к srt в фильтре нужно экранировать (: → \:)
-    srt_for_filter = srt_path.replace(":", "\\:").replace("'", "\\'")
+    is_ass = subs_path.lower().endswith(".ass")
+    subs_for_filter = subs_path.replace(":", "\\:").replace("'", "\\'")
 
-    vf_parts = [
-        "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920",
-        f"subtitles='{srt_for_filter}':force_style='{style}'",
-    ]
+    # 1080x1920 + лёгкий hook-zoom первые 2 сек
+    scale_crop = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920"
+    if hook_zoom:
+        # zoom 1.0 → 1.06 за 2 сек, потом держим 1.0
+        # используем expressions в scale+crop: scale up, then crop center с движущимися offsets
+        # проще: scale больше, crop центрированно с переменным размером кропа
+        zoom_expr = "if(lt(t,2),1+0.03*t,1.06-0.06*(t-2)/0.6)"  # 1→1.06 за 2с, потом плавно обратно за 0.6с
+        zoom_expr = "if(lt(t,2),1+0.03*t,if(lt(t,2.6),1.06-(t-2)/0.6*0.06,1))"
+        # crop с временной шириной
+        scale_crop = (
+            "scale=1200:2133:force_original_aspect_ratio=increase,"
+            f"crop='1080/({zoom_expr})':'1920/({zoom_expr})':(in_w-out_w)/2:(in_h-out_h)/2,"
+            "scale=1080:1920"
+        )
 
-    # text overlays (drawtext) — accent-надписи поверх по timestamp
+    if is_ass:
+        subs_filter = f"ass='{subs_for_filter}'"
+    else:
+        style = "FontName=DejaVu Sans Bold,FontSize=18,PrimaryColour=&HFFFFFF&,OutlineColour=&H000000&,BorderStyle=1,Outline=2,Shadow=0,Alignment=2,MarginV=120"
+        subs_filter = f"subtitles='{subs_for_filter}':force_style='{style}'"
+
+    vf_parts = [scale_crop, subs_filter]
+
+    # text overlays (drawtext) с fade-in
     font_arg = f":fontfile={font_path}" if font_path else ""
     for ov in overlays:
         try:
@@ -73,10 +87,13 @@ def render_reel(
         if not txt:
             continue
         start, end = t, t + d
+        # fade-in 0.3 сек, fade-out 0.3 сек через alpha
+        alpha_expr = f"if(lt(t,{start}+0.3),(t-{start})/0.3,if(gt(t,{end}-0.3),({end}-t)/0.3,1))"
         vf_parts.append(
             f"drawtext=text='{txt}'{font_arg}:fontcolor=white:fontsize=64:"
-            f"borderw=4:bordercolor=black@0.8:"
+            f"borderw=4:bordercolor=black@0.85:"
             f"x=(w-text_w)/2:y=h*0.18:"
+            f"alpha='{alpha_expr}':"
             f"enable='between(t,{start},{end})'"
         )
 

@@ -32,6 +32,7 @@ from services import (
     supabase_storage,
     lexai_client,
     source_downloader,
+    karaoke,
 )
 
 logging.basicConfig(
@@ -56,6 +57,7 @@ def process_job(job: dict) -> None:
     with tempfile.TemporaryDirectory(prefix=f"reel-{job_id[:8]}-") as tmp:
         raw_mp4 = os.path.join(tmp, "raw.mp4")
         srt_path = os.path.join(tmp, "subs.srt")
+        ass_path = os.path.join(tmp, "subs.ass")
         out_mp4 = os.path.join(tmp, "out.mp4")
         cover_jpg = os.path.join(tmp, "cover.jpg")
 
@@ -97,14 +99,18 @@ def process_job(job: dict) -> None:
             )
             overlays = caption_resp.get("overlays") or overlays
 
-        # 3) FFmpeg
+        # 3) Конвертируем SRT → ASS karaoke (TikTok-style)
+        karaoke.srt_to_ass_karaoke(srt, ass_path)
+
+        # 4) FFmpeg
         lexai_client.report_progress(job_id, phase="render")
         ffmpeg_processor.render_reel(
             input_video=raw_mp4,
-            srt_path=srt_path,
+            subs_path=ass_path,
             overlays=overlays,
             music_path=BG_MUSIC_PATH if BG_MUSIC_PATH and os.path.exists(BG_MUSIC_PATH) else None,
             output_path=out_mp4,
+            hook_zoom=True,
         )
         ffmpeg_processor.extract_cover(out_mp4, cover_jpg, at_second=1.5)
 

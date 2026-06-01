@@ -63,6 +63,7 @@ def transcribe_to_srt(audio_or_video_path: str, *, language: str = "ru") -> str:
             "-osrt",
             "-of", srt_base,
             "-t", "2",          # 2 потока — щадим CPU при параллельных задачах
+            "-ml", "18",        # короткие сегменты → плотный karaoke-эффект
             "--no-prints",
         ]
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
