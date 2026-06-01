@@ -50,13 +50,12 @@ def _build_header(p: StyleConfig) -> str:
     outline = hex_to_ass(p.outline_hex)
     bold = 1 if p.bold else 0
 
-    # BackColour для pill-фона
     if p.text_bg:
         back = hex_to_ass(p.outline_hex, alpha=255 - p.text_bg_alpha)
-        border_style = 4   # opaque box
+        border_style = 4
     else:
         back = "&H64000000"
-        border_style = 1   # outline only
+        border_style = 1
 
     return f"""[Script Info]
 ScriptType: v4.00+
@@ -74,6 +73,87 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
 
 
+def _cinematic_ass(srt_text: str, out_path: str, p: StyleConfig) -> str:
+    """Спец-рендер для cinematic_mode: одно слово в кадре, акценты italic serif + цвет + подчёркивание."""
+    events: list[str] = []
+    word_idx = 0
+    color_idx = 0
+    accent_colors = p.accent_colors or ["#FFD54F"]
+
+    for m in SRT_BLOCK.finditer(srt_text):
+        h1, m1, s1, ms1 = int(m.group(2)), int(m.group(3)), int(m.group(4)), int(m.group(5))
+        h2, m2, s2, ms2 = int(m.group(6)), int(m.group(7)), int(m.group(8)), int(m.group(9))
+        start_s = h1 * 3600 + m1 * 60 + s1 + ms1 / 1000
+        end_s = h2 * 3600 + m2 * 60 + s2 + ms2 / 1000
+        text = m.group(10).strip().replace("\n", " ")
+        if not text:
+            continue
+        text = re.sub(r"\s+", " ", text).strip()
+        words = text.split(" ")
+        if not words:
+            continue
+        duration = max(0.3, end_s - start_s)
+
+        # Время каждому слову пропорционально длине
+        word_lens = [len(w) for w in words]
+        wt_total = sum(word_lens) or 1
+        cursor = start_s
+
+        for w in words:
+            wd = duration * len(w) / wt_total
+            w_start = cursor
+            w_end = w_start + wd
+            cursor = w_end
+
+            # Фильтр слишком коротких слов: показываем минимум 0.18 сек, расширяя в обе стороны
+            if w_end - w_start < 0.18:
+                pad = (0.18 - (w_end - w_start)) / 2
+                w_start = max(start_s, w_start - pad)
+                w_end = w_end + pad
+
+            is_accent = (word_idx + 1) % p.accent_every_n_word == 0
+            word_idx += 1
+
+            if is_accent:
+                # Italic serif в цвете + подчёркивание
+                color = accent_colors[color_idx % len(accent_colors)]
+                color_idx += 1
+                color_ass = hex_to_ass(color)
+                font_size = int(round(CANVAS_H * p.font_size_pct * p.accent_size_ratio / 100))
+                shown = _escape_ass(w.lower())            # italic-акцент — нижний регистр
+                underline = 1 if p.accent_underline else 0
+                # tags: смена шрифта + italic + цвет + размер + (опц.) underline + bouncy fade
+                tags = (
+                    f"\\fad(80,60)"
+                    f"\\fn{p.accent_font}"
+                    f"\\i1"
+                    f"\\u{underline}"
+                    f"\\fs{font_size}"
+                    f"\\1c{color_ass}"
+                    f"\\fscx88\\fscy88\\t(0,140,\\fscx100\\fscy100)"
+                )
+            else:
+                # Bold sans CAPS, белый, основной размер
+                shown = _escape_ass(w.upper())
+                tags = (
+                    f"\\fad(80,60)"
+                    f"\\fn{p.font_name}\\b1"
+                    f"\\1c{hex_to_ass(p.primary_hex)}"
+                    f"\\fscx92\\fscy92\\t(0,120,\\fscx104\\fscy104)"
+                )
+
+            text_block = "{" + tags + "}" + shown
+            events.append(
+                f"Dialogue: 0,{_ass_time(w_start)},{_ass_time(w_end)},Active,,0,0,0,,{text_block}"
+            )
+
+    body = _build_header(p) + "\n".join(events) + "\n"
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(body)
+    log.info("ASS cinematic [%s]: %d words → %s", p.name, len(events), out_path)
+    return out_path
+
+
 def _animation_prefix(p: StyleConfig) -> str:
     """ASS-теги анимации появления."""
     d = p.anim_duration_ms
@@ -89,7 +169,10 @@ def _animation_prefix(p: StyleConfig) -> str:
 
 
 def srt_to_ass_styled(srt_text: str, out_path: str, preset: StyleConfig) -> str:
-    """Конвертирует SRT в ASS с тремя цветовыми состояниями слова."""
+    """Конвертирует SRT в ASS. Если preset.cinematic_mode — спец-рендер."""
+    if preset.cinematic_mode:
+        return _cinematic_ass(srt_text, out_path, preset)
+
     primary_c = hex_to_ass(preset.primary_hex)
     active_c = hex_to_ass(preset.active_word_hex)
     spoken_c = hex_to_ass(preset.spoken_word_hex)

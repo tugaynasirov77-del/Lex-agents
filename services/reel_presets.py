@@ -67,6 +67,14 @@ class StyleConfig:
     # Звук
     music_volume: float = 0.12         # 0..1, относительно голоса 1.0
 
+    # ──── Cinematic mode (для стиля "наставник") ────
+    cinematic_mode: bool = False       # включает специальный one-word-at-time рендер
+    accent_font: str = "EB Garamond"   # serif italic для акцентов
+    accent_colors: list = field(default_factory=lambda: ["#FFD54F", "#E53935", "#F0E6D2"])
+    accent_every_n_word: int = 3       # каждое N-ое слово — акцент (italic serif + цвет)
+    accent_size_ratio: float = 0.78    # размер italic относительно основного
+    accent_underline: bool = True
+
 
 # ─────────────────── ПРЕСЕТ 1: МИНИМАЛИЗМ-ЭКСПЕРТ ───────────────────
 EXPERT_CLEAN = StyleConfig(
@@ -180,10 +188,58 @@ AI_TECH_FAST = StyleConfig(
 )
 
 
+# ─────────────────── ПРЕСЕТ 4: CINEMATIC MENTOR ───────────────────
+# Стиль "наставника": одно слово в кадре по центру, ОЧЕНЬ крупно,
+# смесь Bold sans-caps + italic serif с подчёркиванием на акцентных словах.
+CINEMATIC_MENTOR = StyleConfig(
+    name="cinematic_mentor",
+    label="Cinematic Mentor",
+    description="Крупный текст по центру, italic-акценты, jump-cuts. Премиум-видеомонтаж.",
+
+    font_name="Montserrat",
+    font_size_pct=11.0,                # 1920*0.11 ≈ 210px — крупно
+    bold=True,
+
+    primary_hex="#FFFFFF",
+    outline_hex="#000000",
+    outline_px=3,                       # минимальная обводка для clean look
+    active_word_hex="#FFD54F",
+    spoken_word_hex="#FFFFFF",
+
+    text_bg=False,
+
+    margin_v_pct=42,                   # ≈ по центру вертикали
+    alignment=5,                       # 5 = центр-центр в ASS
+    words_per_segment=1,               # ОДНО слово на dialogue
+    case="upper",
+
+    animation="pop",
+    anim_duration_ms=130,
+
+    hook_zoom_factor=1.04,             # минимальный zoom, не нужен большой — текст и так доминирует
+    hook_zoom_duration_s=1.2,
+
+    contrast=1.10,
+    saturation=1.06,
+    gamma=0.98,
+    temperature="warm",                # подкрашиваем тёплым — кинематографичнее
+
+    music_volume=0.16,
+
+    cinematic_mode=True,
+    accent_font="EB Garamond",
+    accent_colors=["#FFD54F", "#E53935", "#F0E6D2"],
+    accent_every_n_word=3,
+    accent_size_ratio=0.74,
+    accent_underline=True,
+)
+
+
 PRESETS = {
     "expert_clean": EXPERT_CLEAN,
     "personal_brand_energy": PERSONAL_BRAND_ENERGY,
     "ai_tech_fast": AI_TECH_FAST,
+    "cinematic_mentor": CINEMATIC_MENTOR,
 }
 
 
