@@ -197,34 +197,34 @@ CINEMATIC_MENTOR = StyleConfig(
     description="Крупный текст по центру, italic-акценты, jump-cuts. Премиум-видеомонтаж.",
 
     font_name="Montserrat Black",
-    font_size_pct=6.0,                 # 1920*0.06 ≈ 115px — компактнее, помещается в 2 колонки
+    font_size_pct=5.5,                 # 1920*0.055 ≈ 106px — для плашек оптимально
     bold=True,
 
-    primary_hex="#FFFFFF",
+    primary_hex="#0B0F1A",             # тёмный текст внутри плашки (для светлых плашек)
     outline_hex="#000000",
-    outline_px=2,                       # очень тонкая, для clean Klap-look
+    outline_px=28,                     # это padding внутри opaque box (BorderStyle=4)
     active_word_hex="#FFD54F",
     spoken_word_hex="#FFFFFF",
 
-    text_bg=False,
+    text_bg=True,
 
-    margin_v_pct=42,                   # ≈ по центру вертикали
-    alignment=5,                       # 5 = центр-центр в ASS
-    words_per_segment=1,               # ОДНО слово на dialogue
+    margin_v_pct=22,                   # 22% снизу — нижняя четверть кадра
+    alignment=2,                       # 2 = bottom-center
+    words_per_segment=3,
     case="upper",
 
     animation="pop",
-    anim_duration_ms=130,
+    anim_duration_ms=160,
 
-    hook_zoom_factor=1.04,             # минимальный zoom, не нужен большой — текст и так доминирует
-    hook_zoom_duration_s=1.2,
+    hook_zoom_factor=1.06,
+    hook_zoom_duration_s=1.4,
 
-    contrast=1.10,
-    saturation=1.06,
-    gamma=0.98,
-    temperature="warm",                # подкрашиваем тёплым — кинематографичнее
+    contrast=1.08,
+    saturation=1.05,
+    gamma=0.99,
+    temperature="neutral",
 
-    music_volume=0.16,
+    music_volume=0.14,
 
     cinematic_mode=True,
     accent_font="DejaVu Serif",       # 100% кириллица; Garamond пропускал буквы

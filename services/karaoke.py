@@ -65,7 +65,7 @@ def _build_header(p: StyleConfig) -> str:
         back = "&H64000000"
         border_style = 1
 
-    return f"""[Script Info]
+    base_header = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {CANVAS_W}
 PlayResY: {CANVAS_H}
@@ -75,50 +75,50 @@ WrapStyle: 0
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Active,{p.font_name},{font_size},{primary},&H000000FF,{outline},{back},{bold},0,0,0,100,100,0,0,{border_style},{p.outline_px},0,{p.alignment},40,40,{margin_v},1
-
-[Events]
-Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
+
+    # Дополнительные стили для cinematic_mode (4 цветные плашки)
+    if p.cinematic_mode:
+        pill_size = int(round(CANVAS_H * p.font_size_pct / 100))
+        text_dark = "&H001A0F0B"   # #0B0F1A → BGR
+        text_light = "&H00FFFFFF"  # белый
+
+        # Цветные фоны плашек (BGR в ASS)
+        pill_cyan = "&H00FFC800"      # #00C8FF
+        pill_yellow = "&H004FD5FF"    # #FFD54F
+        pill_orange = "&H002D7AFF"    # #FF7A2D
+        pill_white = "&H00F0F0F0"     # #F0F0F0
+
+        # BorderStyle=4 = opaque box. Outline=N = padding в N px вокруг текста.
+        pad = 28
+        pills = [
+            ("PillCyan", text_dark, pill_cyan),
+            ("PillYellow", text_dark, pill_yellow),
+            ("PillOrange", text_light, pill_orange),
+            ("PillWhite", text_dark, pill_white),
+        ]
+        for name, txt_col, bg_col in pills:
+            base_header += (
+                f"Style: {name},{p.font_name},{pill_size},{txt_col},&H000000FF,"
+                f"{txt_col},{bg_col},1,0,0,0,100,100,0,0,4,{pad},0,2,40,40,{margin_v},1\n"
+            )
+
+    base_header += "\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+    return base_header
 
 
 def _cinematic_ass(srt_text: str, out_path: str, p: StyleConfig) -> str:
-    """Business Mentor / Klap-style: текст СЛЕВА, группы по 4 слова в layout
-    [левый блок 2 строки] → [правый блок 2 строки]. Каждое слово появляется
-    отдельно (staggered pop-in). Последнее слово группы — жёлтым акцентом.
+    """Klap "construction worker" стиль: ALL CAPS короткие фразы в цветных плашках,
+    цвет циклится cyan → yellow → orange → white. По центру внизу, pop-in.
     """
     events: list[str] = []
-    accent_color = (p.accent_colors or ["#FFD54F"])[0]
-    accent_color_ass = hex_to_ass(accent_color)
-    primary_ass = hex_to_ass(p.primary_hex)
-    outline_ass = hex_to_ass(p.outline_hex)
 
-    # Координаты — текст по левой стороне
-    LEFT_X = 80
-    RIGHT_X = 560
-    Y_TOP = 850
-    Y_BOT = 985
-    ARROW_X = 490
-    ARROW_Y = 920
-    SOLO_X = 80
-    SOLO_Y_TOP = 890
-    SOLO_Y_BOT = 1020
+    pill_styles = ["PillCyan", "PillYellow", "PillOrange", "PillWhite"]
 
     font_size = int(round(CANVAS_H * p.font_size_pct / 100))
-    arrow_size = int(font_size * 0.95)
-    SLIDE_PX = 120            # на сколько слово выкатывается слева
-    SLIDE_MS = 200            # за какое время
-
-    # Доступная ширина колонки (для авто-сжатия длинных слов)
-    LEFT_MAX_W = ARROW_X - LEFT_X - 25
-    RIGHT_MAX_W = CANVAS_W - RIGHT_X - 40
-    SOLO_MAX_W = CANVAS_W - SOLO_X - 50
-
-    def fit_scale(word_text: str, max_w: int) -> int:
-        # Montserrat Black avg char-width ≈ 0.62*fs при ALL CAPS
-        est = len(word_text) * font_size * 0.62
-        if est <= max_w:
-            return 100
-        return max(55, int(100 * max_w / est))
+    PHRASE_MAX_CHARS = 18              # макс длина фразы в плашке (вкл. пробелы)
+    MIN_PHRASE_DUR = 0.6               # плашка не короче 0.6 сек на экране
+    INTER_GAP = 0.04                   # 40мс между плашками — глаз не путается
 
     # Сбор плоского списка слов с whisper-таймингами (естественными, без растяжки)
     flat: list[tuple[str, float, float]] = []
@@ -143,76 +143,52 @@ def _cinematic_ass(srt_text: str, out_path: str, p: StyleConfig) -> str:
             if cleaned and len(cleaned) >= 2:
                 flat.append((cleaned, w_start, w_end))
 
-    def word_tag(x: int, y: int, color_ass: str, word_text: str, max_w: int) -> str:
-        scale = fit_scale(word_text, max_w)
-        return (
-            f"\\move({x - SLIDE_PX},{y},{x},{y},0,{SLIDE_MS})"
-            f"\\fad({SLIDE_MS},60)"
-            f"\\fn{p.font_name}\\b1"
-            f"\\fs{font_size}"
-            f"\\1c{color_ass}"
-            f"\\3c{outline_ass}\\bord{p.outline_px}"
-            f"\\fscx{scale}\\fscy{scale}"
-            f"\\an4"  # left-middle anchor
+    # Группируем слова в "фразы" — максимум 18 символов или 3 слова, что наступит раньше
+    phrases: list[tuple[str, float, float]] = []
+    cur_words: list[tuple[str, float, float]] = []
+    cur_chars = 0
+
+    def flush():
+        if not cur_words:
+            return
+        text = " ".join(w for w, _, _ in cur_words).upper()
+        ph_start = cur_words[0][1]
+        ph_end = cur_words[-1][2]
+        phrases.append((text, ph_start, ph_end))
+
+    for w, w_start, w_end in flat:
+        upper_w = w.upper()
+        added_chars = len(upper_w) + (1 if cur_words else 0)
+        if (cur_chars + added_chars > PHRASE_MAX_CHARS or len(cur_words) >= 3) and cur_words:
+            flush()
+            cur_words = []
+            cur_chars = 0
+        cur_words.append((w, w_start, w_end))
+        cur_chars += added_chars
+    flush()
+
+    # Минимальная длительность + gap между плашками
+    fixed: list[tuple[str, float, float]] = []
+    for idx, (text, ph_start, ph_end) in enumerate(phrases):
+        if ph_end - ph_start < MIN_PHRASE_DUR:
+            ph_end = ph_start + MIN_PHRASE_DUR
+        # подрезаем конец, если следующая фраза близко — оставляем gap
+        if idx + 1 < len(phrases):
+            next_start = phrases[idx + 1][1]
+            if ph_end > next_start - INTER_GAP:
+                ph_end = next_start - INTER_GAP
+                if ph_end - ph_start < 0.3:
+                    ph_end = ph_start + 0.3
+        fixed.append((text, ph_start, ph_end))
+
+    # Рендер: плашка циклически меняет цвет
+    for idx, (text, ph_start, ph_end) in enumerate(fixed):
+        style = pill_styles[idx % len(pill_styles)]
+        # Pop-in анимация: scale 80→100 за 150ms + fade
+        tags = "{\\fad(120,80)\\fscx82\\fscy82\\t(0,160,\\fscx100\\fscy100)}"
+        events.append(
+            f"Dialogue: 0,{_ass_time(ph_start)},{_ass_time(ph_end)},{style},,0,0,0,,{tags}{_escape_ass(text)}"
         )
-
-    # Идём группами по 4. Если в конце осталось <4 — рендерим как левый блок только.
-    i = 0
-    while i < len(flat):
-        group = flat[i : i + 4]
-        i += 4
-        group_end = group[-1][2]
-
-        if len(group) >= 4:
-            # ПОЛНЫЙ layout: [w1/w2] → [w3/w4-yellow]
-            for idx, (w, w_start, _) in enumerate(group):
-                is_yellow = idx == 3
-                col = accent_color_ass if is_yellow else primary_ass
-                upper_w = w.upper()
-                if idx == 0:
-                    tag = word_tag(LEFT_X, Y_TOP, col, upper_w, LEFT_MAX_W)
-                elif idx == 1:
-                    tag = word_tag(LEFT_X, Y_BOT, col, upper_w, LEFT_MAX_W)
-                elif idx == 2:
-                    tag = word_tag(RIGHT_X, Y_TOP, col, upper_w, RIGHT_MAX_W)
-                else:
-                    tag = word_tag(RIGHT_X, Y_BOT, col, upper_w, RIGHT_MAX_W)
-                events.append(f"Dialogue: 0,{_ass_time(w_start)},{_ass_time(group_end)},Active,,0,0,0,,{{{tag}}}{_escape_ass(upper_w)}")
-
-            # Стрелка — появляется между блоками когда стартует правый
-            arrow_start = group[2][1]
-            arrow_tag = (
-                f"\\pos({ARROW_X},{ARROW_Y})"
-                f"\\fad(80,60)"
-                f"\\fn{p.font_name}\\b1\\fs{arrow_size}"
-                f"\\1c{primary_ass}"
-                f"\\3c{outline_ass}\\bord{p.outline_px}"
-                f"\\fscx65\\fscy65\\t(0,140,\\fscx100\\fscy100)"
-                f"\\an5"
-            )
-            events.append(f"Dialogue: 0,{_ass_time(arrow_start)},{_ass_time(group_end)},Active,,0,0,0,,{{{arrow_tag}}}→")
-
-        elif len(group) == 3:
-            for idx, (w, w_start, _) in enumerate(group):
-                upper_w = w.upper()
-                col = accent_color_ass if idx == 2 else primary_ass
-                y = Y_TOP if idx == 0 else (Y_BOT if idx == 1 else Y_BOT + 135)
-                tag = word_tag(LEFT_X, y, col, upper_w, SOLO_MAX_W)
-                events.append(f"Dialogue: 0,{_ass_time(w_start)},{_ass_time(group_end)},Active,,0,0,0,,{{{tag}}}{_escape_ass(upper_w)}")
-
-        elif len(group) == 2:
-            for idx, (w, w_start, _) in enumerate(group):
-                upper_w = w.upper()
-                col = accent_color_ass if idx == 1 else primary_ass
-                y = SOLO_Y_TOP if idx == 0 else SOLO_Y_BOT
-                tag = word_tag(SOLO_X, y, col, upper_w, SOLO_MAX_W)
-                events.append(f"Dialogue: 0,{_ass_time(w_start)},{_ass_time(group_end)},Active,,0,0,0,,{{{tag}}}{_escape_ass(upper_w)}")
-
-        else:  # 1 слово
-            w, w_start, _ = group[0]
-            upper_w = w.upper()
-            tag = word_tag(SOLO_X, SOLO_Y_TOP, accent_color_ass, upper_w, SOLO_MAX_W)
-            events.append(f"Dialogue: 0,{_ass_time(w_start)},{_ass_time(group_end)},Active,,0,0,0,,{{{tag}}}{_escape_ass(upper_w)}")
 
     body = _build_header(p) + "\n".join(events) + "\n"
     with open(out_path, "w", encoding="utf-8") as f:
