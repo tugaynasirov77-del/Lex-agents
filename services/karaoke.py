@@ -35,6 +35,14 @@ def _escape_ass(text: str) -> str:
     return text.replace("\\", "\\\\").replace("{", "(").replace("}", ")")
 
 
+_PUNCT_RE = re.compile(r"[.,!?;:\"'«»()\[\]…]+")
+
+
+def _strip_punct(word: str) -> str:
+    """Убирает пунктуацию из слова целиком (в Reels знаки не нужны)."""
+    return _PUNCT_RE.sub("", word).strip()
+
+
 def _apply_case(text: str, case: str) -> str:
     if case == "upper":
         return text.upper()
@@ -79,18 +87,15 @@ def _cinematic_ass(srt_text: str, out_path: str, p: StyleConfig) -> str:
     color_idx = 0
     accent_colors = p.accent_colors or ["#FFD54F"]
 
-    # Координаты двух строк (PlayResY=1920)
-    TOP_X, TOP_Y = CANVAS_W // 2, 820
-    BOT_X, BOT_Y = CANVAS_W // 2, 1050
-    SOLO_X, SOLO_Y = CANVAS_W // 2, 930  # одиночное слово — по центру
+    # Координаты двух строк — компактно, впритык с лёгким зазором
+    TOP_X, TOP_Y = CANVAS_W // 2, 900
+    BOT_X, BOT_Y = CANVAS_W // 2, 1020
+    SOLO_X, SOLO_Y = CANVAS_W // 2, 960
 
     base_font_size = int(round(CANVAS_H * p.font_size_pct / 100))
     accent_font_size = int(round(CANVAS_H * p.font_size_pct * p.accent_size_ratio / 100))
 
-    global_cursor = 0.0
-    GAP = 0.03
-
-    # сначала собираем плоский список слов с их временами
+    # Используем естественные тайминги Whisper БЕЗ растягивания (иначе слова отстают от голоса)
     flat: list[tuple[str, float, float]] = []  # (word, start, end)
 
     for m in SRT_BLOCK.finditer(srt_text):
@@ -102,15 +107,18 @@ def _cinematic_ass(srt_text: str, out_path: str, p: StyleConfig) -> str:
         if not text:
             continue
         words = text.split(" ")
-        duration = max(0.3, end_s - start_s)
+        duration = max(0.2, end_s - start_s)
         wt_total = sum(len(w) for w in words) or 1
 
+        block_cursor = start_s
         for w in words:
+            cleaned = _strip_punct(w)
             wd = duration * len(w) / wt_total
-            w_start = max(start_s, global_cursor)
-            w_end = max(w_start + wd, w_start + 0.3)
-            global_cursor = w_end + GAP
-            flat.append((w, w_start, w_end))
+            w_start = block_cursor
+            w_end = w_start + wd
+            block_cursor = w_end
+            if cleaned:
+                flat.append((cleaned, w_start, w_end))
 
     # Идём парами: 70% времени — пара (main + accent), 30% — соло
     i = 0
