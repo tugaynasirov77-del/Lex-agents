@@ -344,48 +344,68 @@ def build_user_ass(
             f"\\an5"
         )
 
-    # Идём по словам. Ключевые — отдельно соло. Обычные — группируем по 2-3 в фразу.
+    # Темп речи: разбиваем на фразы по ПАУЗАМ (>400мс между словами) или по ключевому слову.
+    # Внутри фразы — слова появляются ПО ОДНОМУ в свой timestamp через \alpha-fade
+    # (typewriter-эффект: фраза строится в темп речи)
+    PAUSE_MS = 400          # пауза >0.4с разрывает фразу
+    MAX_PHRASE_WORDS = 5    # макс слов в одной фразе
+
     n = len(transcript_words)
     i = 0
     while i < n:
         word = transcript_words[i]
         idx = word.get("idx", i)
-        is_key = idx in key_indices
-
-        if is_key:
+        if idx in key_indices:
+            # Ключевое слово — соло, с выбранной анимацией
             text = word["w"].upper()
-            w_start = word["start_ms"] / 1000
-            w_end = max(word["end_ms"] / 1000, w_start + 0.55)
+            w_start_ms = word["start_ms"]
+            w_end_ms = max(word["end_ms"] + 200, w_start_ms + 550)  # держим минимум 0.55 сек
             tags = key_anim_tags(CENTER_X, CENTER_Y, key_size)
             events.append(
-                f"Dialogue: 0,{_ass_time(w_start)},{_ass_time(w_end)},Active,,0,0,0,,{{{tags}}}{_escape_ass(text)}"
+                f"Dialogue: 0,{_ass_time(w_start_ms / 1000)},{_ass_time(w_end_ms / 1000)},Active,,0,0,0,,{{{tags}}}{_escape_ass(text)}"
             )
             i += 1
-        else:
-            # Группируем обычные слова в фразу пока не упрёмся в ключевое или 3 слова или 22 символа
-            phrase_words = []
-            phrase_chars = 0
-            while i < n and len(phrase_words) < 3:
-                next_w = transcript_words[i]
-                next_idx = next_w.get("idx", i)
-                if next_idx in key_indices:
-                    break
-                added = len(next_w["w"]) + (1 if phrase_words else 0)
-                if phrase_chars + added > 22 and phrase_words:
-                    break
-                phrase_words.append(next_w)
-                phrase_chars += added
-                i += 1
+            continue
 
-            if not phrase_words:
-                continue
-            text = " ".join(w["w"] for w in phrase_words).upper()
-            ph_start = phrase_words[0]["start_ms"] / 1000
-            ph_end = max(phrase_words[-1]["end_ms"] / 1000, ph_start + 0.4)
-            tags = regular_tag(CENTER_X, CENTER_Y, regular_size)
-            events.append(
-                f"Dialogue: 0,{_ass_time(ph_start)},{_ass_time(ph_end)},Active,,0,0,0,,{{{tags}}}{_escape_ass(text)}"
-            )
+        # Собираем фразу обычных слов до: паузы, ключевого, или 5 слов
+        phrase = []
+        while i < n and len(phrase) < MAX_PHRASE_WORDS:
+            w = transcript_words[i]
+            w_idx = w.get("idx", i)
+            if w_idx in key_indices:
+                break
+            if phrase:
+                gap = w["start_ms"] - phrase[-1]["end_ms"]
+                if gap > PAUSE_MS:
+                    break
+            phrase.append(w)
+            i += 1
+
+        if not phrase:
+            continue
+
+        # Строим Dialogue с typewriter-эффектом:
+        # фраза висит от первого слова до последнего + 300мс хвост
+        ph_start_ms = phrase[0]["start_ms"]
+        ph_end_ms = phrase[-1]["end_ms"] + 300
+
+        # Базовые теги фразы (расположение + основной стиль)
+        base = regular_tag(CENTER_X, CENTER_Y, regular_size)
+
+        # Каждое слово стартует невидимым (\alpha&HFF&) и появляется в свой timestamp
+        parts = []
+        for j, w in enumerate(phrase):
+            rel_start = w["start_ms"] - ph_start_ms  # ms от начала Dialogue
+            fade_in_end = rel_start + 120             # 120ms fade
+            sep = " " if j > 0 else ""
+            # \alpha&HFF& — невидимый; \t(t1,t2,\alpha&H00&) — fade in
+            word_tag = f"\\alpha&HFF&\\t({rel_start},{fade_in_end},\\alpha&H00&)"
+            parts.append(f"{sep}{{{word_tag}}}{_escape_ass(w['w'].upper())}{{\\r}}")
+
+        text_block = "".join(parts)
+        events.append(
+            f"Dialogue: 0,{_ass_time(ph_start_ms / 1000)},{_ass_time(ph_end_ms / 1000)},Active,,0,0,0,,{{{base}}}{text_block}"
+        )
 
     # Header для произвольного preset — простой Active
     # Делаем headerless (Active style используется как fallback, но мы override через inline теги)
