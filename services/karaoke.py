@@ -77,32 +77,6 @@ Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour,
 Style: Active,{p.font_name},{font_size},{primary},&H000000FF,{outline},{back},{bold},0,0,0,100,100,0,0,{border_style},{p.outline_px},0,{p.alignment},40,40,{margin_v},1
 """
 
-    # Дополнительные стили для cinematic_mode (4 цветные плашки)
-    if p.cinematic_mode:
-        pill_size = int(round(CANVAS_H * p.font_size_pct / 100))
-        text_dark = "&H001A0F0B"   # #0B0F1A → BGR
-        text_light = "&H00FFFFFF"  # белый
-
-        # Цветные фоны плашек (BGR в ASS)
-        pill_cyan = "&H00FFC800"      # #00C8FF
-        pill_yellow = "&H004FD5FF"    # #FFD54F
-        pill_orange = "&H002D7AFF"    # #FF7A2D
-        pill_white = "&H00F0F0F0"     # #F0F0F0
-
-        # BorderStyle=4 = opaque box. Outline=N = padding в N px вокруг текста.
-        pad = 28
-        pills = [
-            ("PillCyan", text_dark, pill_cyan),
-            ("PillYellow", text_dark, pill_yellow),
-            ("PillOrange", text_light, pill_orange),
-            ("PillWhite", text_dark, pill_white),
-        ]
-        for name, txt_col, bg_col in pills:
-            base_header += (
-                f"Style: {name},{p.font_name},{pill_size},{txt_col},&H000000FF,"
-                f"{txt_col},{bg_col},1,0,0,0,100,100,0,0,4,{pad},0,2,40,40,{margin_v},1\n"
-            )
-
     base_header += "\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
     return base_header
 
@@ -299,3 +273,139 @@ def srt_to_ass_styled(srt_text: str, out_path: str, preset: StyleConfig) -> str:
 def srt_to_ass_karaoke(srt_text: str, out_path: str, max_chars: int = 24) -> str:
     from .reel_presets import EXPERT_CLEAN
     return srt_to_ass_styled(srt_text, out_path, EXPERT_CLEAN)
+
+
+def build_user_ass(
+    *,
+    transcript_words: list[dict],
+    key_indices: set[int],
+    animation: str,
+    out_path: str,
+    preset: StyleConfig,
+) -> str:
+    """Рендер ASS на основе пользовательской выборки.
+
+    Обычные слова: белые, маленький размер (5%), fade-in, по 2-3 в кадре
+    Ключевые слова: жёлтые, БОЛЬШОЙ размер (9%), выбранная анимация, по одному
+
+    animation: 'slide_up' | 'pop' | 'fade'
+    """
+    events: list[str] = []
+
+    regular_size = int(round(CANVAS_H * 0.050))   # ~96px
+    key_size = int(round(CANVAS_H * 0.090))       # ~173px
+    primary_ass = hex_to_ass(preset.primary_hex if preset.primary_hex != "#0B0F1A" else "#FFFFFF")
+    key_color = (preset.accent_colors or ["#FFD54F"])[0]
+    key_ass = hex_to_ass(key_color)
+    outline_ass = hex_to_ass("#000000")
+
+    CENTER_X = CANVAS_W // 2
+    CENTER_Y = 1100  # ближе к низу, чтобы голова в кадре не перекрывалась
+
+    def key_anim_tags(x: int, y: int, fs: int) -> str:
+        if animation == "slide_up":
+            # выкатывается снизу
+            return (
+                f"\\move({x},{y + 120},{x},{y},0,220)"
+                f"\\fad(180,80)"
+                f"\\fs{fs}"
+                f"\\1c{key_ass}\\3c{outline_ass}\\bord4"
+                f"\\fn{preset.font_name}\\b1"
+                f"\\fscx80\\fscy80\\t(0,200,\\fscx108\\fscy108)\\t(200,330,\\fscx100\\fscy100)"
+                f"\\an5"
+            )
+        if animation == "pop":
+            return (
+                f"\\pos({x},{y})"
+                f"\\fad(80,80)"
+                f"\\fs{fs}"
+                f"\\1c{key_ass}\\3c{outline_ass}\\bord4"
+                f"\\fn{preset.font_name}\\b1"
+                f"\\fscx0\\fscy0\\t(0,180,\\fscx115\\fscy115)\\t(180,280,\\fscx100\\fscy100)"
+                f"\\an5"
+            )
+        # fade
+        return (
+            f"\\pos({x},{y})"
+            f"\\fad(200,100)"
+            f"\\fs{fs}"
+            f"\\1c{key_ass}\\3c{outline_ass}\\bord4"
+            f"\\fn{preset.font_name}\\b1"
+            f"\\an5"
+        )
+
+    def regular_tag(x: int, y: int, fs: int) -> str:
+        return (
+            f"\\pos({x},{y})"
+            f"\\fad(100,80)"
+            f"\\fs{fs}"
+            f"\\1c{primary_ass}\\3c{outline_ass}\\bord3"
+            f"\\fn{preset.font_name}\\b1"
+            f"\\an5"
+        )
+
+    # Идём по словам. Ключевые — отдельно соло. Обычные — группируем по 2-3 в фразу.
+    n = len(transcript_words)
+    i = 0
+    while i < n:
+        word = transcript_words[i]
+        idx = word.get("idx", i)
+        is_key = idx in key_indices
+
+        if is_key:
+            text = word["w"].upper()
+            w_start = word["start_ms"] / 1000
+            w_end = max(word["end_ms"] / 1000, w_start + 0.55)
+            tags = key_anim_tags(CENTER_X, CENTER_Y, key_size)
+            events.append(
+                f"Dialogue: 0,{_ass_time(w_start)},{_ass_time(w_end)},Active,,0,0,0,,{{{tags}}}{_escape_ass(text)}"
+            )
+            i += 1
+        else:
+            # Группируем обычные слова в фразу пока не упрёмся в ключевое или 3 слова или 22 символа
+            phrase_words = []
+            phrase_chars = 0
+            while i < n and len(phrase_words) < 3:
+                next_w = transcript_words[i]
+                next_idx = next_w.get("idx", i)
+                if next_idx in key_indices:
+                    break
+                added = len(next_w["w"]) + (1 if phrase_words else 0)
+                if phrase_chars + added > 22 and phrase_words:
+                    break
+                phrase_words.append(next_w)
+                phrase_chars += added
+                i += 1
+
+            if not phrase_words:
+                continue
+            text = " ".join(w["w"] for w in phrase_words).upper()
+            ph_start = phrase_words[0]["start_ms"] / 1000
+            ph_end = max(phrase_words[-1]["end_ms"] / 1000, ph_start + 0.4)
+            tags = regular_tag(CENTER_X, CENTER_Y, regular_size)
+            events.append(
+                f"Dialogue: 0,{_ass_time(ph_start)},{_ass_time(ph_end)},Active,,0,0,0,,{{{tags}}}{_escape_ass(text)}"
+            )
+
+    # Header для произвольного preset — простой Active
+    # Делаем headerless (Active style используется как fallback, но мы override через inline теги)
+    header = f"""[Script Info]
+ScriptType: v4.00+
+PlayResX: {CANVAS_W}
+PlayResY: {CANVAS_H}
+ScaledBorderAndShadow: yes
+WrapStyle: 0
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Active,{preset.font_name},{regular_size},{primary_ass},&H000000FF,{outline_ass},&H64000000,1,0,0,0,100,100,0,0,1,3,0,5,40,40,40,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+
+    body = header + "\n".join(events) + "\n"
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(body)
+    log.info("user-ass: %d events, %d key words", len(events), len(key_indices))
+    return out_path

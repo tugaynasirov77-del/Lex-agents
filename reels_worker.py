@@ -54,58 +54,78 @@ def process_job(job: dict) -> None:
     mode = job.get("mode", "avatar")
     overlays = job.get("overlays") or []
     preset = reel_presets.get_preset(job.get("preset"))
-    log.info("=== job %s mode=%s preset=%s (draft %s) ===", job_id, mode, preset.name, draft_id)
+    user_selections = job.get("user_selections")
+    transcript_words = job.get("transcript_words")
+
+    has_selections = bool(user_selections and isinstance(user_selections, dict))
+    log.info("=== job %s mode=%s preset=%s has_selections=%s (draft %s) ===",
+             job_id, mode, preset.name, has_selections, draft_id)
 
     with tempfile.TemporaryDirectory(prefix=f"reel-{job_id[:8]}-") as tmp:
         raw_mp4 = os.path.join(tmp, "raw.mp4")
-        srt_path = os.path.join(tmp, "subs.srt")
         ass_path = os.path.join(tmp, "subs.ass")
         out_mp4 = os.path.join(tmp, "out.mp4")
         cover_jpg = os.path.join(tmp, "cover.jpg")
 
-        # 1) Получаем raw mp4 — либо от HeyGen, либо скачиваем загруженное клиентом
+        # ============== PHASE 1: транскрипция (если ещё не делали) ==============
+        if not has_selections:
+            lexai_client.report_progress(job_id, status="rendering", phase="download")
+            if mode == "from_upload":
+                src_url = job.get("source_video_url")
+                if not src_url:
+                    raise RuntimeError("from_upload job has no source_video_url")
+                source_downloader.download_source_video(src_url, raw_mp4)
+            else:
+                script: str = job.get("script") or ""
+                if not script.strip():
+                    raise RuntimeError("avatar job has empty script")
+                video_id = heygen_client.create_video(script)
+                lexai_client.report_progress(job_id, heygen_video_id=video_id)
+                result = heygen_client.poll_until_ready(video_id)
+                if not result.video_url:
+                    raise RuntimeError("HeyGen returned empty video_url")
+                heygen_client.download_video(result.video_url, raw_mp4)
+
+            lexai_client.report_progress(job_id, phase="transcribe")
+            words = whisper_client.transcribe_to_words(raw_mp4, language="ru")
+            if not words:
+                raise RuntimeError("whisper returned no words")
+
+            # Сохраняем word-level транскрипт и ждём юзера
+            lexai_client.report_progress(
+                job_id,
+                status="awaiting_approval",
+                phase="awaiting_approval",
+                transcript_words=words,
+            )
+            log.info("=== job %s PHASE 1 DONE — awaiting user approval ===", job_id)
+            return
+
+        # ============== PHASE 2: рендер по выборке юзера ==============
+        if not transcript_words:
+            raise RuntimeError("phase 2 but transcript_words missing")
+
+        # скачиваем raw mp4 заново (Phase 1 уже скачивал, но за tmp не сохранили)
         lexai_client.report_progress(job_id, status="rendering", phase="download")
         if mode == "from_upload":
-            src_url = job.get("source_video_url")
-            if not src_url:
-                raise RuntimeError("from_upload job has no source_video_url")
-            source_downloader.download_source_video(src_url, raw_mp4)
+            source_downloader.download_source_video(job["source_video_url"], raw_mp4)
         else:
-            script: str = job.get("script") or ""
-            if not script.strip():
-                raise RuntimeError("avatar job has empty script")
-            video_id = heygen_client.create_video(script)
-            lexai_client.report_progress(job_id, heygen_video_id=video_id)
-            result = heygen_client.poll_until_ready(video_id)
-            if not result.video_url:
-                raise RuntimeError("HeyGen returned empty video_url")
-            heygen_client.download_video(result.video_url, raw_mp4)
+            # для avatar Phase 2 потребует кэширования HeyGen-видео где-то.
+            # Пока поддерживаем только from_upload в новом 2-фазном workflow.
+            raise RuntimeError("Phase 2 supports only from_upload mode for now")
 
-        # 2) Whisper: транскрипт + SRT
-        lexai_client.report_progress(job_id, phase="transcribe")
-        srt = whisper_client.transcribe_to_srt(raw_mp4, language="ru")
-        ffmpeg_processor.write_srt(srt, srt_path)
-        lexai_client.report_progress(job_id, srt_text=srt[:8000])
-
-        # 2.5) Если from_upload — Алина пишет caption + overlays по транскрипту
-        if mode == "from_upload":
-            lexai_client.report_progress(job_id, phase="caption")
-            transcript_text = "\n".join(
-                line for line in srt.splitlines()
-                if line.strip() and not line.strip().isdigit() and "-->" not in line
-            )
-            caption_resp = lexai_client.caption_from_transcript(
-                project_id=project_id,
-                draft_id=draft_id,
-                transcript=transcript_text,
-            )
-            overlays = caption_resp.get("overlays") or overlays
-
-        # 3) SRT → ASS karaoke с применением пресета
-        karaoke.srt_to_ass_styled(srt, ass_path, preset)
-
-        # 4) FFmpeg с цветокором и hook-zoom из пресета
+        # Строим ASS на основе пользовательской выборки
         lexai_client.report_progress(job_id, phase="render")
+        key_indices = set(user_selections.get("key_indices") or [])
+        animation = user_selections.get("animation", "slide_up")
+        karaoke.build_user_ass(
+            transcript_words=transcript_words,
+            key_indices=key_indices,
+            animation=animation,
+            out_path=ass_path,
+            preset=preset,
+        )
+
         ffmpeg_processor.render_reel(
             input_video=raw_mp4,
             subs_path=ass_path,
@@ -117,7 +137,7 @@ def process_job(job: dict) -> None:
         )
         ffmpeg_processor.extract_cover(out_mp4, cover_jpg, at_second=1.5)
 
-        # 4) Upload готового mp4 + обложки в bucket reels
+        # Upload
         lexai_client.report_progress(job_id, phase="upload")
         remote_video = f"{draft_id}/reel.mp4"
         remote_cover = f"{draft_id}/cover.jpg"
