@@ -37,7 +37,8 @@ def render_reel(
     music_volume: float = 0.08,
     font_path: str | None = None,
     hook_zoom: bool = True,
-    preset=None,  # services.reel_presets.StyleConfig — если задан, переопределяет hook/colorgrade/music
+    preset=None,
+    sfx_events: list[tuple[int, str]] | None = None,  # [(time_ms, sfx_path), ...]
 ) -> str:
     """Финальный рендер.
 
@@ -127,25 +128,42 @@ def render_reel(
 
     vf = ",".join(vf_parts)
 
-    cmd: list[str] = [
-        "ffmpeg", "-y",
-        "-i", input_video,
-    ]
+    cmd: list[str] = ["ffmpeg", "-y", "-i", input_video]
+    input_idx = 0
+    music_idx: int | None = None
+    sfx_inputs: list[tuple[int, int]] = []  # (input_index, delay_ms)
+
     if music_path and os.path.exists(music_path):
         cmd += ["-stream_loop", "-1", "-i", music_path]
+        input_idx += 1
+        music_idx = input_idx
 
-    cmd += [
-        "-vf", vf,
-    ]
+    if sfx_events:
+        for delay_ms, sfx_path in sfx_events:
+            if os.path.exists(sfx_path):
+                cmd += ["-i", sfx_path]
+                input_idx += 1
+                sfx_inputs.append((input_idx, delay_ms))
 
-    if music_path and os.path.exists(music_path):
-        # микс аудио: оригинал 1.0 + фон music_volume
-        cmd += [
-            "-filter_complex",
-            f"[0:a]volume=1.0[a0];[1:a]volume={music_volume}[a1];[a0][a1]amix=inputs=2:duration=first:dropout_transition=0[aout]",
-            "-map", "0:v",
-            "-map", "[aout]",
-        ]
+    cmd += ["-vf", vf]
+
+    # Сборка audio filter chain
+    audio_parts: list[str] = []
+    audio_parts.append("[0:a]volume=1.0[a0]")
+    mix_inputs = ["[a0]"]
+
+    if music_idx is not None:
+        audio_parts.append(f"[{music_idx}:a]volume={music_volume}[am]")
+        mix_inputs.append("[am]")
+
+    for sfx_in_idx, delay_ms in sfx_inputs:
+        # adelay добавляет тишину перед звуком (нужно указать для всех каналов: stereo = "X|X")
+        audio_parts.append(f"[{sfx_in_idx}:a]adelay={delay_ms}|{delay_ms},volume=0.7[sfx{sfx_in_idx}]")
+        mix_inputs.append(f"[sfx{sfx_in_idx}]")
+
+    if len(mix_inputs) > 1:
+        audio_parts.append(f"{''.join(mix_inputs)}amix=inputs={len(mix_inputs)}:duration=first:dropout_transition=0[aout]")
+        cmd += ["-filter_complex", ";".join(audio_parts), "-map", "0:v", "-map", "[aout]"]
     else:
         cmd += ["-map", "0:v", "-map", "0:a?"]
 
