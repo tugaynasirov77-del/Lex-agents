@@ -80,6 +80,10 @@ def _cinematic_ass(srt_text: str, out_path: str, p: StyleConfig) -> str:
     color_idx = 0
     accent_colors = p.accent_colors or ["#FFD54F"]
 
+    # ГЛОБАЛЬНЫЙ курсор — общий для всех SRT-блоков, чтобы слова никогда не накладывались
+    global_cursor = 0.0
+    GAP = 0.03  # 30ms между словами для визуального разделения
+
     for m in SRT_BLOCK.finditer(srt_text):
         h1, m1, s1, ms1 = int(m.group(2)), int(m.group(3)), int(m.group(4)), int(m.group(5))
         h2, m2, s2, ms2 = int(m.group(6)), int(m.group(7)), int(m.group(8)), int(m.group(9))
@@ -93,31 +97,25 @@ def _cinematic_ass(srt_text: str, out_path: str, p: StyleConfig) -> str:
         if not words:
             continue
         duration = max(0.3, end_s - start_s)
-
-        # Время каждому слову пропорционально длине
         word_lens = [len(w) for w in words]
         wt_total = sum(word_lens) or 1
-        cursor = start_s
 
         for w in words:
-            wd = duration * len(w) / wt_total
-            w_start = cursor
-            w_end = w_start + wd
-            cursor = w_end
+            natural_wd = duration * len(w) / wt_total
+            # Стартуем не раньше глобального курсора (нет наложений на предыдущее слово)
+            w_start = max(start_s, global_cursor)
+            w_end = w_start + natural_wd
 
             is_accent = (word_idx + 1) % p.accent_every_n_word == 0
             word_idx += 1
-
-            # Слово длиной <3 символов — не делать accent (часто служебное слово, и italic короткое мелькание плохо читается)
             if is_accent and len(w) < 3:
                 is_accent = False
 
-            # Расширяем ТОЛЬКО конец (не залезая в следующее слово через padding в начало).
-            # Если есть следующее слово — крадём чуть его старта.
             min_dur = 0.5 if is_accent else 0.35
             if w_end - w_start < min_dur:
                 w_end = w_start + min_dur
-                cursor = w_end  # обновляем курсор чтобы следующее слово стартовало позже
+
+            global_cursor = w_end + GAP  # фиксируем глобальный конец + gap
 
             if is_accent:
                 # Italic serif в цвете + подчёркивание
