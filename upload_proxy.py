@@ -23,6 +23,9 @@ import hmac
 import hashlib
 import time
 import logging
+import asyncio
+import subprocess
+import tempfile
 
 import httpx
 from aiohttp import web
@@ -34,7 +37,9 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SR_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 WORKER_SECRET = os.environ.get("WORKER_SECRET", "")
 BUCKET = "raw-uploads"
-MAX_BYTES = 52 * 1024 * 1024  # 50 MB
+MAX_BYTES = 100 * 1024 * 1024     # 100 MB — клиент может слать большой исходник
+COMPRESS_THRESHOLD = 40 * 1024 * 1024  # > 40 МБ — пережимаем перед загрузкой в Supabase
+SUPABASE_LIMIT = 50 * 1024 * 1024  # лимит free tier
 
 
 def verify_token(token: str, storage_path: str) -> bool:
@@ -72,37 +77,95 @@ async def upload(request: web.Request) -> web.Response:
         return web.json_response({"error": "send raw body, not multipart"}, status=400)
 
     total = 0
-    chunks: list[bytes] = []
-    async for chunk in request.content.iter_chunked(64 * 1024):
-        total += len(chunk)
-        if total > MAX_BYTES:
-            return web.json_response({"error": "file > 50 MB"}, status=413)
-        chunks.append(chunk)
-    body = b"".join(chunks)
+    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+        tmp_path = tmp.name
+        async for chunk in request.content.iter_chunked(256 * 1024):
+            total += len(chunk)
+            if total > MAX_BYTES:
+                os.unlink(tmp_path)
+                return web.json_response({"error": "file > 100 MB"}, status=413)
+            tmp.write(chunk)
+
     if total == 0:
+        os.unlink(tmp_path)
         return web.json_response({"error": "empty body"}, status=400)
 
-    log.info("uploading %d bytes → %s", total, storage_path)
+    log.info("received %d bytes → %s", total, storage_path)
+
+    upload_path = tmp_path
+    final_size = total
+
+    # Если файл крупнее лимита Supabase (50 МБ) — компрессим через FFmpeg
+    if total > COMPRESS_THRESHOLD:
+        compressed = tmp_path + ".compressed.mp4"
+        log.info("compressing %.1f MB → target ~30 MB", total / 1_048_576)
+        # crf 28, preset fast, max bitrate 2M — выходит ~2-3 МБ на 10 сек 1080p
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", tmp_path,
+            "-c:v", "libx264",
+            "-preset", "fast",
+            "-crf", "28",
+            "-maxrate", "2500k",
+            "-bufsize", "5000k",
+            "-vf", "scale=-2:1080",   # макс 1080p по высоте, сохраняем aspect
+            "-c:a", "aac",
+            "-b:a", "96k",
+            "-movflags", "+faststart",
+            compressed,
+        ]
+        proc = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            os.unlink(tmp_path)
+            log.error("ffmpeg failed: %s", stderr[-500:])
+            return web.json_response({"error": "compression failed", "detail": stderr[-300:].decode("utf-8", errors="ignore")}, status=500)
+
+        new_size = os.path.getsize(compressed)
+        log.info("compressed: %.1f MB → %.1f MB", total / 1_048_576, new_size / 1_048_576)
+
+        if new_size > SUPABASE_LIMIT:
+            os.unlink(tmp_path)
+            os.unlink(compressed)
+            return web.json_response(
+                {"error": f"file too large even after compression ({new_size / 1_048_576:.1f} MB)"},
+                status=413,
+            )
+
+        os.unlink(tmp_path)
+        upload_path = compressed
+        final_size = new_size
+
+    # Загружаем в Supabase
+    with open(upload_path, "rb") as f:
+        upload_body = f.read()
 
     target = f"{SUPABASE_URL}/storage/v1/object/{BUCKET}/{storage_path}"
-    async with httpx.AsyncClient(timeout=180.0) as client:
+    async with httpx.AsyncClient(timeout=300.0) as client:
         r = await client.post(
             target,
-            content=body,
+            content=upload_body,
             headers={
                 "Authorization": f"Bearer {SR_KEY}",
                 "apikey": SR_KEY,
-                "Content-Type": content_type if content_type else "video/mp4",
+                "Content-Type": "video/mp4",
                 "x-upsert": "true",
             },
         )
+    os.unlink(upload_path)
+
     if r.status_code >= 400:
         log.warning("supabase upload failed %s: %s", r.status_code, r.text[:300])
         return web.json_response({"error": f"supabase: {r.status_code}", "detail": r.text[:300]}, status=502)
 
     source_video_url = f"{SUPABASE_URL}/storage/v1/object/{BUCKET}/{storage_path}"
-    log.info("done %s (%d bytes)", storage_path, total)
-    return web.json_response({"source_video_url": source_video_url, "size": total})
+    log.info("done %s (received %d → uploaded %d)", storage_path, total, final_size)
+    return web.json_response({
+        "source_video_url": source_video_url,
+        "received_size": total,
+        "uploaded_size": final_size,
+        "compressed": final_size < total,
+    })
 
 
 async def health(_: web.Request) -> web.Response:
@@ -127,7 +190,7 @@ async def cors_mw(request: web.Request, handler):
 
 
 def make_app() -> web.Application:
-    app = web.Application(client_max_size=MAX_BYTES + 1_048_576, middlewares=[cors_mw])
+    app = web.Application(client_max_size=MAX_BYTES + 4_194_304, middlewares=[cors_mw])
     app.router.add_post("/upload", upload)
     app.router.add_get("/health", health)
     app.router.add_options("/upload", lambda r: web.Response(status=204))

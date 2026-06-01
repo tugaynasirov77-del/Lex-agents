@@ -105,14 +105,15 @@ def _cinematic_ass(srt_text: str, out_path: str, p: StyleConfig) -> str:
             w_end = w_start + wd
             cursor = w_end
 
-            # Фильтр слишком коротких слов: показываем минимум 0.18 сек, расширяя в обе стороны
-            if w_end - w_start < 0.18:
-                pad = (0.18 - (w_end - w_start)) / 2
-                w_start = max(start_s, w_start - pad)
-                w_end = w_end + pad
-
             is_accent = (word_idx + 1) % p.accent_every_n_word == 0
             word_idx += 1
+
+            # Минимальное время показа: 0.4 сек обычное, 0.55 сек акцентное (italic дольше читается)
+            min_dur = 0.55 if is_accent else 0.4
+            if w_end - w_start < min_dur:
+                pad = (min_dur - (w_end - w_start)) / 2
+                w_start = max(0.0, w_start - pad)
+                w_end = w_end + pad
 
             if is_accent:
                 # Italic serif в цвете + подчёркивание

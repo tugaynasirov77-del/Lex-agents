@@ -197,7 +197,7 @@ CINEMATIC_MENTOR = StyleConfig(
     description="Крупный текст по центру, italic-акценты, jump-cuts. Премиум-видеомонтаж.",
 
     font_name="Montserrat",
-    font_size_pct=11.0,                # 1920*0.11 ≈ 210px — крупно
+    font_size_pct=8.5,                 # 1920*0.085 ≈ 163px — крупно но читаемо
     bold=True,
 
     primary_hex="#FFFFFF",
