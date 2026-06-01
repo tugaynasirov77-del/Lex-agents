@@ -33,6 +33,7 @@ from services import (
     lexai_client,
     source_downloader,
     karaoke,
+    reel_presets,
 )
 
 logging.basicConfig(
@@ -52,7 +53,8 @@ def process_job(job: dict) -> None:
     project_id = job["project_id"]
     mode = job.get("mode", "avatar")
     overlays = job.get("overlays") or []
-    log.info("=== job %s mode=%s (draft %s) ===", job_id, mode, draft_id)
+    preset = reel_presets.get_preset(job.get("preset"))
+    log.info("=== job %s mode=%s preset=%s (draft %s) ===", job_id, mode, preset.name, draft_id)
 
     with tempfile.TemporaryDirectory(prefix=f"reel-{job_id[:8]}-") as tmp:
         raw_mp4 = os.path.join(tmp, "raw.mp4")
@@ -99,10 +101,10 @@ def process_job(job: dict) -> None:
             )
             overlays = caption_resp.get("overlays") or overlays
 
-        # 3) Конвертируем SRT → ASS karaoke (TikTok-style)
-        karaoke.srt_to_ass_karaoke(srt, ass_path)
+        # 3) SRT → ASS karaoke с применением пресета
+        karaoke.srt_to_ass_styled(srt, ass_path, preset)
 
-        # 4) FFmpeg
+        # 4) FFmpeg с цветокором и hook-zoom из пресета
         lexai_client.report_progress(job_id, phase="render")
         ffmpeg_processor.render_reel(
             input_video=raw_mp4,
@@ -111,6 +113,7 @@ def process_job(job: dict) -> None:
             music_path=BG_MUSIC_PATH if BG_MUSIC_PATH and os.path.exists(BG_MUSIC_PATH) else None,
             output_path=out_mp4,
             hook_zoom=True,
+            preset=preset,
         )
         ffmpeg_processor.extract_cover(out_mp4, cover_jpg, at_second=1.5)
 

@@ -37,35 +37,63 @@ def render_reel(
     music_volume: float = 0.08,
     font_path: str | None = None,
     hook_zoom: bool = True,
+    preset=None,  # services.reel_presets.StyleConfig — если задан, переопределяет hook/colorgrade/music
 ) -> str:
     """Финальный рендер.
 
     subs_path: ASS-файл (TikTok karaoke) или SRT — определяется по расширению.
     overlays: iterable of {time:int sec, text:str, duration:int sec}
-    hook_zoom: zoom-in эффект первые 2 сек для удержания внимания
+    hook_zoom: zoom-in эффект для удержания внимания (параметры из preset)
+    preset: StyleConfig — управляет hook_zoom_factor/duration, цветокор, music_volume
     """
     if not os.path.exists(input_video):
         raise FFmpegError(f"input not found: {input_video}")
     if not os.path.exists(subs_path):
         raise FFmpegError(f"subs not found: {subs_path}")
 
+    # параметры из пресета (если есть)
+    if preset is not None:
+        music_volume = preset.music_volume
+        hook_z = preset.hook_zoom_factor if hook_zoom else 1.0
+        hook_d = preset.hook_zoom_duration_s
+        contrast = preset.contrast
+        saturation = preset.saturation
+        gamma = preset.gamma
+        temperature = preset.temperature
+    else:
+        hook_z = 1.06 if hook_zoom else 1.0
+        hook_d = 2.0
+        contrast = 1.0
+        saturation = 1.0
+        gamma = 1.0
+        temperature = "neutral"
+
     is_ass = subs_path.lower().endswith(".ass")
     subs_for_filter = subs_path.replace(":", "\\:").replace("'", "\\'")
 
-    # 1080x1920 + лёгкий hook-zoom первые 2 сек
-    scale_crop = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920"
-    if hook_zoom:
-        # zoom 1.0 → 1.06 за 2 сек, потом держим 1.0
-        # используем expressions в scale+crop: scale up, then crop center с движущимися offsets
-        # проще: scale больше, crop центрированно с переменным размером кропа
-        zoom_expr = "if(lt(t,2),1+0.03*t,1.06-0.06*(t-2)/0.6)"  # 1→1.06 за 2с, потом плавно обратно за 0.6с
-        zoom_expr = "if(lt(t,2),1+0.03*t,if(lt(t,2.6),1.06-(t-2)/0.6*0.06,1))"
-        # crop с временной шириной
+    # 1080x1920 + hook-zoom первые hook_d сек
+    if hook_zoom and hook_z > 1.001:
+        zoom_expr = (
+            f"if(lt(t,{hook_d}),1+({hook_z}-1)*t/{hook_d},"
+            f"if(lt(t,{hook_d}+0.6),{hook_z}-({hook_z}-1)*(t-{hook_d})/0.6,1))"
+        )
         scale_crop = (
-            "scale=1200:2133:force_original_aspect_ratio=increase,"
+            f"scale={int(1080 * hook_z + 20)}:{int(1920 * hook_z + 20)}:force_original_aspect_ratio=increase,"
             f"crop='1080/({zoom_expr})':'1920/({zoom_expr})':(in_w-out_w)/2:(in_h-out_h)/2,"
             "scale=1080:1920"
         )
+    else:
+        scale_crop = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920"
+
+    # Цветокор
+    eq = f"eq=contrast={contrast}:saturation={saturation}:gamma={gamma}"
+    color_grade_parts = [eq]
+    if temperature == "cold":
+        # лёгкий синий тинт через curves: чуть приглушить красный, поднять синий
+        color_grade_parts.append("curves=r='0/0 0.5/0.47 1/1':b='0/0 0.5/0.53 1/1'")
+    elif temperature == "warm":
+        color_grade_parts.append("curves=r='0/0 0.5/0.53 1/1':b='0/0 0.5/0.47 1/1'")
+    color_grade = ",".join(color_grade_parts)
 
     if is_ass:
         subs_filter = f"ass='{subs_for_filter}'"
@@ -73,7 +101,7 @@ def render_reel(
         style = "FontName=DejaVu Sans Bold,FontSize=18,PrimaryColour=&HFFFFFF&,OutlineColour=&H000000&,BorderStyle=1,Outline=2,Shadow=0,Alignment=2,MarginV=120"
         subs_filter = f"subtitles='{subs_for_filter}':force_style='{style}'"
 
-    vf_parts = [scale_crop, subs_filter]
+    vf_parts = [scale_crop, color_grade, subs_filter]
 
     # text overlays (drawtext) с fade-in
     font_arg = f":fontfile={font_path}" if font_path else ""
