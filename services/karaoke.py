@@ -92,19 +92,33 @@ def _cinematic_ass(srt_text: str, out_path: str, p: StyleConfig) -> str:
     primary_ass = hex_to_ass(p.primary_hex)
     outline_ass = hex_to_ass(p.outline_hex)
 
-    # Координаты — текст по левой стороне (но если только левый блок — он сдвигается чуть правее)
-    LEFT_X = 90                # отступ от левого края
-    RIGHT_X = 640              # начало правого блока
-    Y_TOP = 830                # верхняя строка блока
-    Y_BOT = 970                # нижняя строка
-    ARROW_X = 530              # стрелка между блоками
-    ARROW_Y = 905
-    SOLO_X = 90
-    SOLO_Y_TOP = 880
-    SOLO_Y_BOT = 1010
+    # Координаты — текст по левой стороне
+    LEFT_X = 80
+    RIGHT_X = 560
+    Y_TOP = 850
+    Y_BOT = 985
+    ARROW_X = 490
+    ARROW_Y = 920
+    SOLO_X = 80
+    SOLO_Y_TOP = 890
+    SOLO_Y_BOT = 1020
 
     font_size = int(round(CANVAS_H * p.font_size_pct / 100))
-    arrow_size = int(font_size * 0.9)
+    arrow_size = int(font_size * 0.95)
+    SLIDE_PX = 120            # на сколько слово выкатывается слева
+    SLIDE_MS = 200            # за какое время
+
+    # Доступная ширина колонки (для авто-сжатия длинных слов)
+    LEFT_MAX_W = ARROW_X - LEFT_X - 25
+    RIGHT_MAX_W = CANVAS_W - RIGHT_X - 40
+    SOLO_MAX_W = CANVAS_W - SOLO_X - 50
+
+    def fit_scale(word_text: str, max_w: int) -> int:
+        # Montserrat Black avg char-width ≈ 0.62*fs при ALL CAPS
+        est = len(word_text) * font_size * 0.62
+        if est <= max_w:
+            return 100
+        return max(55, int(100 * max_w / est))
 
     # Сбор плоского списка слов с whisper-таймингами (естественными, без растяжки)
     flat: list[tuple[str, float, float]] = []
@@ -125,19 +139,21 @@ def _cinematic_ass(srt_text: str, out_path: str, p: StyleConfig) -> str:
             wd = duration * len(w) / wt_total
             w_start, w_end = cur, cur + wd
             cur = w_end
-            if cleaned:
+            # Игнорируем слова короче 2 символов (артефакты whisper) и пустые
+            if cleaned and len(cleaned) >= 2:
                 flat.append((cleaned, w_start, w_end))
 
-    def word_tag(x: int, y: int, color_ass: str, *, bold: bool = True, size: int = font_size) -> str:
+    def word_tag(x: int, y: int, color_ass: str, word_text: str, max_w: int) -> str:
+        scale = fit_scale(word_text, max_w)
         return (
-            f"\\pos({x},{y})"
-            f"\\fad(90,60)"
-            f"\\fn{p.font_name}\\b{1 if bold else 0}"
-            f"\\fs{size}"
+            f"\\move({x - SLIDE_PX},{y},{x},{y},0,{SLIDE_MS})"
+            f"\\fad({SLIDE_MS},60)"
+            f"\\fn{p.font_name}\\b1"
+            f"\\fs{font_size}"
             f"\\1c{color_ass}"
             f"\\3c{outline_ass}\\bord{p.outline_px}"
-            f"\\fscx86\\fscy86\\t(0,140,\\fscx100\\fscy100)"
-            f"\\an4"  # left-middle anchor (текст растёт вправо от точки)
+            f"\\fscx{scale}\\fscy{scale}"
+            f"\\an4"  # left-middle anchor
         )
 
     # Идём группами по 4. Если в конце осталось <4 — рендерим как левый блок только.
@@ -152,16 +168,16 @@ def _cinematic_ass(srt_text: str, out_path: str, p: StyleConfig) -> str:
             for idx, (w, w_start, _) in enumerate(group):
                 is_yellow = idx == 3
                 col = accent_color_ass if is_yellow else primary_ass
+                upper_w = w.upper()
                 if idx == 0:
-                    tag = word_tag(LEFT_X, Y_TOP, col)
+                    tag = word_tag(LEFT_X, Y_TOP, col, upper_w, LEFT_MAX_W)
                 elif idx == 1:
-                    tag = word_tag(LEFT_X, Y_BOT, col)
+                    tag = word_tag(LEFT_X, Y_BOT, col, upper_w, LEFT_MAX_W)
                 elif idx == 2:
-                    tag = word_tag(RIGHT_X, Y_TOP, col)
+                    tag = word_tag(RIGHT_X, Y_TOP, col, upper_w, RIGHT_MAX_W)
                 else:
-                    tag = word_tag(RIGHT_X, Y_BOT, col)
-                txt = _escape_ass(w.upper())
-                events.append(f"Dialogue: 0,{_ass_time(w_start)},{_ass_time(group_end)},Active,,0,0,0,,{{{tag}}}{txt}")
+                    tag = word_tag(RIGHT_X, Y_BOT, col, upper_w, RIGHT_MAX_W)
+                events.append(f"Dialogue: 0,{_ass_time(w_start)},{_ass_time(group_end)},Active,,0,0,0,,{{{tag}}}{_escape_ass(upper_w)}")
 
             # Стрелка — появляется между блоками когда стартует правый
             arrow_start = group[2][1]
@@ -171,35 +187,32 @@ def _cinematic_ass(srt_text: str, out_path: str, p: StyleConfig) -> str:
                 f"\\fn{p.font_name}\\b1\\fs{arrow_size}"
                 f"\\1c{primary_ass}"
                 f"\\3c{outline_ass}\\bord{p.outline_px}"
-                f"\\fscx70\\fscy70\\t(0,120,\\fscx100\\fscy100)"
+                f"\\fscx65\\fscy65\\t(0,140,\\fscx100\\fscy100)"
                 f"\\an5"
             )
             events.append(f"Dialogue: 0,{_ass_time(arrow_start)},{_ass_time(group_end)},Active,,0,0,0,,{{{arrow_tag}}}→")
 
         elif len(group) == 3:
-            # 2 слова слева + 1 слово ниже жёлтым (без стрелки)
-            tags = [word_tag(LEFT_X, Y_TOP, primary_ass),
-                    word_tag(LEFT_X, Y_BOT, accent_color_ass)]
-            # Размещаем 3-е слово по центру внизу
-            tag3 = word_tag(LEFT_X, Y_BOT + 130, accent_color_ass)
             for idx, (w, w_start, _) in enumerate(group):
-                tag = tag3 if idx == 2 else tags[idx]
-                txt = _escape_ass(w.upper())
-                events.append(f"Dialogue: 0,{_ass_time(w_start)},{_ass_time(group_end)},Active,,0,0,0,,{{{tag}}}{txt}")
+                upper_w = w.upper()
+                col = accent_color_ass if idx == 2 else primary_ass
+                y = Y_TOP if idx == 0 else (Y_BOT if idx == 1 else Y_BOT + 135)
+                tag = word_tag(LEFT_X, y, col, upper_w, SOLO_MAX_W)
+                events.append(f"Dialogue: 0,{_ass_time(w_start)},{_ass_time(group_end)},Active,,0,0,0,,{{{tag}}}{_escape_ass(upper_w)}")
 
         elif len(group) == 2:
-            # 2 слова, второе жёлтым
             for idx, (w, w_start, _) in enumerate(group):
+                upper_w = w.upper()
                 col = accent_color_ass if idx == 1 else primary_ass
                 y = SOLO_Y_TOP if idx == 0 else SOLO_Y_BOT
-                tag = word_tag(SOLO_X, y, col)
-                txt = _escape_ass(w.upper())
-                events.append(f"Dialogue: 0,{_ass_time(w_start)},{_ass_time(group_end)},Active,,0,0,0,,{{{tag}}}{txt}")
+                tag = word_tag(SOLO_X, y, col, upper_w, SOLO_MAX_W)
+                events.append(f"Dialogue: 0,{_ass_time(w_start)},{_ass_time(group_end)},Active,,0,0,0,,{{{tag}}}{_escape_ass(upper_w)}")
 
         else:  # 1 слово
             w, w_start, _ = group[0]
-            tag = word_tag(SOLO_X, SOLO_Y_TOP, accent_color_ass)
-            events.append(f"Dialogue: 0,{_ass_time(w_start)},{_ass_time(group_end)},Active,,0,0,0,,{{{tag}}}{_escape_ass(w.upper())}")
+            upper_w = w.upper()
+            tag = word_tag(SOLO_X, SOLO_Y_TOP, accent_color_ass, upper_w, SOLO_MAX_W)
+            events.append(f"Dialogue: 0,{_ass_time(w_start)},{_ass_time(group_end)},Active,,0,0,0,,{{{tag}}}{_escape_ass(upper_w)}")
 
     body = _build_header(p) + "\n".join(events) + "\n"
     with open(out_path, "w", encoding="utf-8") as f:
