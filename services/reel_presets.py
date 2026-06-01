@@ -227,10 +227,10 @@ CINEMATIC_MENTOR = StyleConfig(
     music_volume=0.16,
 
     cinematic_mode=True,
-    accent_font="EB Garamond",
+    accent_font="DejaVu Serif",       # 100% кириллица; Garamond пропускал буквы
     accent_colors=["#FFD54F", "#E53935", "#F0E6D2"],
-    accent_every_n_word=3,
-    accent_size_ratio=0.74,
+    accent_every_n_word=4,             # реже акценты — каждое 4-е слово
+    accent_size_ratio=0.85,
     accent_underline=True,
 )
 

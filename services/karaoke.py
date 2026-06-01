@@ -108,12 +108,16 @@ def _cinematic_ass(srt_text: str, out_path: str, p: StyleConfig) -> str:
             is_accent = (word_idx + 1) % p.accent_every_n_word == 0
             word_idx += 1
 
-            # Минимальное время показа: 0.4 сек обычное, 0.55 сек акцентное (italic дольше читается)
-            min_dur = 0.55 if is_accent else 0.4
+            # Слово длиной <3 символов — не делать accent (часто служебное слово, и italic короткое мелькание плохо читается)
+            if is_accent and len(w) < 3:
+                is_accent = False
+
+            # Расширяем ТОЛЬКО конец (не залезая в следующее слово через padding в начало).
+            # Если есть следующее слово — крадём чуть его старта.
+            min_dur = 0.5 if is_accent else 0.35
             if w_end - w_start < min_dur:
-                pad = (min_dur - (w_end - w_start)) / 2
-                w_start = max(0.0, w_start - pad)
-                w_end = w_end + pad
+                w_end = w_start + min_dur
+                cursor = w_end  # обновляем курсор чтобы следующее слово стартовало позже
 
             if is_accent:
                 # Italic serif в цвете + подчёркивание
