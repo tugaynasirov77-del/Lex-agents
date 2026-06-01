@@ -60,7 +60,7 @@ def process_job(job: dict) -> None:
         cover_jpg = os.path.join(tmp, "cover.jpg")
 
         # 1) Получаем raw mp4 — либо от HeyGen, либо скачиваем загруженное клиентом
-        lexai_client.report_progress(job_id, status="rendering")
+        lexai_client.report_progress(job_id, status="rendering", phase="download")
         if mode == "from_upload":
             src_url = job.get("source_video_url")
             if not src_url:
@@ -78,12 +78,14 @@ def process_job(job: dict) -> None:
             heygen_client.download_video(result.video_url, raw_mp4)
 
         # 2) Whisper: транскрипт + SRT
+        lexai_client.report_progress(job_id, phase="transcribe")
         srt = whisper_client.transcribe_to_srt(raw_mp4, language="ru")
         ffmpeg_processor.write_srt(srt, srt_path)
         lexai_client.report_progress(job_id, srt_text=srt[:8000])
 
         # 2.5) Если from_upload — Алина пишет caption + overlays по транскрипту
         if mode == "from_upload":
+            lexai_client.report_progress(job_id, phase="caption")
             transcript_text = "\n".join(
                 line for line in srt.splitlines()
                 if line.strip() and not line.strip().isdigit() and "-->" not in line
@@ -96,6 +98,7 @@ def process_job(job: dict) -> None:
             overlays = caption_resp.get("overlays") or overlays
 
         # 3) FFmpeg
+        lexai_client.report_progress(job_id, phase="render")
         ffmpeg_processor.render_reel(
             input_video=raw_mp4,
             srt_path=srt_path,
@@ -106,6 +109,7 @@ def process_job(job: dict) -> None:
         ffmpeg_processor.extract_cover(out_mp4, cover_jpg, at_second=1.5)
 
         # 4) Upload готового mp4 + обложки в bucket reels
+        lexai_client.report_progress(job_id, phase="upload")
         remote_video = f"{draft_id}/reel.mp4"
         remote_cover = f"{draft_id}/cover.jpg"
         video_url = supabase_storage.upload_file(out_mp4, remote_video, content_type="video/mp4")
