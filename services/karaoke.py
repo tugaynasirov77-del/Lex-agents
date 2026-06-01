@@ -74,86 +74,106 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 
 def _cinematic_ass(srt_text: str, out_path: str, p: StyleConfig) -> str:
-    """Спец-рендер для cinematic_mode: одно слово в кадре, акценты italic serif + цвет + подчёркивание."""
+    """Cinematic 2-row layout: верхнее слово BOLD CAPS, под ним italic-accent появляется отдельным событием."""
     events: list[str] = []
-    word_idx = 0
     color_idx = 0
     accent_colors = p.accent_colors or ["#FFD54F"]
 
-    # ГЛОБАЛЬНЫЙ курсор — общий для всех SRT-блоков, чтобы слова никогда не накладывались
+    # Координаты двух строк (PlayResY=1920)
+    TOP_X, TOP_Y = CANVAS_W // 2, 820
+    BOT_X, BOT_Y = CANVAS_W // 2, 1050
+    SOLO_X, SOLO_Y = CANVAS_W // 2, 930  # одиночное слово — по центру
+
+    base_font_size = int(round(CANVAS_H * p.font_size_pct / 100))
+    accent_font_size = int(round(CANVAS_H * p.font_size_pct * p.accent_size_ratio / 100))
+
     global_cursor = 0.0
-    GAP = 0.03  # 30ms между словами для визуального разделения
+    GAP = 0.03
+
+    # сначала собираем плоский список слов с их временами
+    flat: list[tuple[str, float, float]] = []  # (word, start, end)
 
     for m in SRT_BLOCK.finditer(srt_text):
         h1, m1, s1, ms1 = int(m.group(2)), int(m.group(3)), int(m.group(4)), int(m.group(5))
         h2, m2, s2, ms2 = int(m.group(6)), int(m.group(7)), int(m.group(8)), int(m.group(9))
         start_s = h1 * 3600 + m1 * 60 + s1 + ms1 / 1000
         end_s = h2 * 3600 + m2 * 60 + s2 + ms2 / 1000
-        text = m.group(10).strip().replace("\n", " ")
+        text = re.sub(r"\s+", " ", m.group(10).strip().replace("\n", " ")).strip()
         if not text:
             continue
-        text = re.sub(r"\s+", " ", text).strip()
         words = text.split(" ")
-        if not words:
-            continue
         duration = max(0.3, end_s - start_s)
-        word_lens = [len(w) for w in words]
-        wt_total = sum(word_lens) or 1
+        wt_total = sum(len(w) for w in words) or 1
 
         for w in words:
-            natural_wd = duration * len(w) / wt_total
-            # Стартуем не раньше глобального курсора (нет наложений на предыдущее слово)
+            wd = duration * len(w) / wt_total
             w_start = max(start_s, global_cursor)
-            w_end = w_start + natural_wd
+            w_end = max(w_start + wd, w_start + 0.3)
+            global_cursor = w_end + GAP
+            flat.append((w, w_start, w_end))
 
-            is_accent = (word_idx + 1) % p.accent_every_n_word == 0
-            word_idx += 1
-            if is_accent and len(w) < 3:
-                is_accent = False
+    # Идём парами: 70% времени — пара (main + accent), 30% — соло
+    i = 0
+    while i < len(flat):
+        # Пара? — если есть следующее слово и оба >2 символов
+        if i + 1 < len(flat) and len(flat[i][0]) >= 2 and len(flat[i + 1][0]) >= 3:
+            main_w, m_start, m_end = flat[i]
+            acc_w, a_start, a_end = flat[i + 1]
 
-            min_dur = 0.5 if is_accent else 0.35
-            if w_end - w_start < min_dur:
-                w_end = w_start + min_dur
-
-            global_cursor = w_end + GAP  # фиксируем глобальный конец + gap
-
-            if is_accent:
-                # Italic serif в цвете + подчёркивание
-                color = accent_colors[color_idx % len(accent_colors)]
-                color_idx += 1
-                color_ass = hex_to_ass(color)
-                font_size = int(round(CANVAS_H * p.font_size_pct * p.accent_size_ratio / 100))
-                shown = _escape_ass(w.lower())            # italic-акцент — нижний регистр
-                underline = 1 if p.accent_underline else 0
-                # tags: смена шрифта + italic + цвет + размер + (опц.) underline + bouncy fade
-                tags = (
-                    f"\\fad(80,60)"
-                    f"\\fn{p.accent_font}"
-                    f"\\i1"
-                    f"\\u{underline}"
-                    f"\\fs{font_size}"
-                    f"\\1c{color_ass}"
-                    f"\\fscx88\\fscy88\\t(0,140,\\fscx100\\fscy100)"
-                )
-            else:
-                # Bold sans CAPS, белый, основной размер
-                shown = _escape_ass(w.upper())
-                tags = (
-                    f"\\fad(80,60)"
-                    f"\\fn{p.font_name}\\b1"
-                    f"\\1c{hex_to_ass(p.primary_hex)}"
-                    f"\\fscx92\\fscy92\\t(0,120,\\fscx104\\fscy104)"
-                )
-
-            text_block = "{" + tags + "}" + shown
-            events.append(
-                f"Dialogue: 0,{_ass_time(w_start)},{_ass_time(w_end)},Active,,0,0,0,,{text_block}"
+            # TOP — main word: показываем от его начала до конца accent (висит пока появляется второе)
+            top_tags = (
+                f"\\pos({TOP_X},{TOP_Y})"
+                f"\\fad(100,80)"
+                f"\\fn{p.font_name}\\b1"
+                f"\\fs{base_font_size}"
+                f"\\1c{hex_to_ass(p.primary_hex)}"
+                f"\\3c{hex_to_ass(p.outline_hex)}\\bord{p.outline_px}"
+                f"\\fscx92\\fscy92\\t(0,140,\\fscx102\\fscy102)"
+                f"\\an5"
             )
+            top_text = "{" + top_tags + "}" + _escape_ass(main_w.upper())
+            events.append(f"Dialogue: 0,{_ass_time(m_start)},{_ass_time(a_end)},Active,,0,0,0,,{top_text}")
+
+            # BOTTOM — italic accent
+            color = accent_colors[color_idx % len(accent_colors)]
+            color_idx += 1
+            color_ass = hex_to_ass(color)
+            underline = 1 if p.accent_underline else 0
+            bot_tags = (
+                f"\\pos({BOT_X},{BOT_Y})"
+                f"\\fad(120,80)"
+                f"\\fn{p.accent_font}\\i1\\u{underline}"
+                f"\\fs{accent_font_size}"
+                f"\\1c{color_ass}"
+                f"\\3c{hex_to_ass(p.outline_hex)}\\bord2"
+                f"\\fscx88\\fscy88\\t(0,170,\\fscx100\\fscy100)"
+                f"\\an5"
+            )
+            bot_text = "{" + bot_tags + "}" + _escape_ass(acc_w.lower())
+            events.append(f"Dialogue: 0,{_ass_time(a_start)},{_ass_time(a_end)},Active,,0,0,0,,{bot_text}")
+
+            i += 2
+        else:
+            # Одиночное слово по центру
+            w, w_start, w_end = flat[i]
+            solo_tags = (
+                f"\\pos({SOLO_X},{SOLO_Y})"
+                f"\\fad(100,80)"
+                f"\\fn{p.font_name}\\b1"
+                f"\\fs{base_font_size}"
+                f"\\1c{hex_to_ass(p.primary_hex)}"
+                f"\\3c{hex_to_ass(p.outline_hex)}\\bord{p.outline_px}"
+                f"\\fscx92\\fscy92\\t(0,140,\\fscx102\\fscy102)"
+                f"\\an5"
+            )
+            solo_text = "{" + solo_tags + "}" + _escape_ass(w.upper())
+            events.append(f"Dialogue: 0,{_ass_time(w_start)},{_ass_time(w_end)},Active,,0,0,0,,{solo_text}")
+            i += 1
 
     body = _build_header(p) + "\n".join(events) + "\n"
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(body)
-    log.info("ASS cinematic [%s]: %d words → %s", p.name, len(events), out_path)
+    log.info("ASS cinematic [%s]: %d events / %d words → %s", p.name, len(events), len(flat), out_path)
     return out_path
 
 
