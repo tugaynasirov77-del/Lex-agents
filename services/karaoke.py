@@ -295,10 +295,8 @@ def build_user_ass(
     regular_size = int(round(CANVAS_H * 0.050))   # ~96px
     key_size = int(round(CANVAS_H * 0.090))       # ~173px
     primary_ass = hex_to_ass(preset.primary_hex if preset.primary_hex != "#0B0F1A" else "#FFFFFF")
-    # Палитра для ключевых слов — циклически по очереди (как у Klap)
-    ACCENT_HEXES = preset.accent_colors or ["#FFD54F", "#4FC3F7", "#FF8A65", "#FFFFFF"]
-    if len(ACCENT_HEXES) < 2:
-        ACCENT_HEXES = ACCENT_HEXES + ["#4FC3F7", "#FF8A65"]
+    # Палитра для ключевых слов — мягкая, без агрессивного красного (как у Klap)
+    ACCENT_HEXES = ["#FFD54F", "#FFFFFF", "#4FC3F7"]
     accent_asses = [hex_to_ass(c) for c in ACCENT_HEXES]
     # Цвет уже произнесённого слова в karaoke-подсветке
     spoken_ass = hex_to_ass("#9AA0A6")
@@ -451,9 +449,14 @@ def build_user_ass(
 
         # Karaoke-подсветка: каждое слово окрашено в primary, в свой момент → accent, потом → spoken
         parts = []
+        ph_dur = ph_end_ms - ph_start_ms
         for j, w in enumerate(phrase):
             rel_start = max(0, w["start_ms"] - ph_start_ms)
-            rel_end = min(ph_end_ms - ph_start_ms, max(rel_start + 100, w["end_ms"] - ph_start_ms))
+            # для последнего слова: даём 200мс на анимацию затемнения внутри длительности фразы
+            raw_end = max(rel_start + 100, w["end_ms"] - ph_start_ms)
+            rel_end = min(raw_end, ph_dur - 220)
+            if rel_end < rel_start + 80:
+                rel_end = rel_start + 80
             # без цветной подсветки: слово остаётся белым, после произнесения плавно темнеет в серый
             sep = ""
             if j > 0:
@@ -461,7 +464,7 @@ def build_user_ass(
             word_block = (
                 f"{sep}"
                 f"{{\\1c{primary_ass}"
-                f"\\t({rel_end},{rel_end + 120},\\1c{spoken_ass})}}"
+                f"\\t({rel_end},{rel_end + 180},\\1c{spoken_ass})}}"
                 f"{_escape_ass(words_upper[j])}"
             )
             parts.append(word_block)
