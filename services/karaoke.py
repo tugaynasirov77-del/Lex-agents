@@ -415,7 +415,17 @@ def build_user_ass(
             # циклическая палитра для ключевых
             color_ass = accent_asses[key_color_counter % len(accent_asses)]
             key_color_counter += 1
-            tags = key_anim_tags(CENTER_X, CENTER_Y, key_size, color_ass)
+            # авто-уменьшение шрифта для длинных слов чтобы не вылезали за края
+            text_len = len(seg["text"])
+            if text_len <= 8:
+                fs_key = key_size
+            elif text_len <= 11:
+                fs_key = int(key_size * 0.78)
+            elif text_len <= 14:
+                fs_key = int(key_size * 0.62)
+            else:
+                fs_key = int(key_size * 0.50)
+            tags = key_anim_tags(CENTER_X, CENTER_Y, fs_key, color_ass)
             events.append(
                 f"Dialogue: 1,{_ass_time(seg['start'] / 1000)},{_ass_time(seg['end'] / 1000)},KeyWord,,0,0,0,,{{{tags}}}{_escape_ass(seg['text'])}"
             )
@@ -444,16 +454,14 @@ def build_user_ass(
         for j, w in enumerate(phrase):
             rel_start = max(0, w["start_ms"] - ph_start_ms)
             rel_end = min(ph_end_ms - ph_start_ms, max(rel_start + 100, w["end_ms"] - ph_start_ms))
-            # цвет активного слова — циклический accent
-            active_color = accent_asses[(key_color_counter + j) % len(accent_asses)]
+            # без цветной подсветки: слово остаётся белым, после произнесения плавно темнеет в серый
             sep = ""
             if j > 0:
                 sep = "\\N" if j == line_break_idx else " "
             word_block = (
                 f"{sep}"
                 f"{{\\1c{primary_ass}"
-                f"\\t({rel_start},{rel_start + 60},\\1c{active_color})"
-                f"\\t({rel_end},{rel_end + 80},\\1c{spoken_ass})}}"
+                f"\\t({rel_end},{rel_end + 120},\\1c{spoken_ass})}}"
                 f"{_escape_ass(words_upper[j])}"
             )
             parts.append(word_block)
