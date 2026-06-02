@@ -301,6 +301,8 @@ def build_user_ass(
 
     CENTER_X = CANVAS_W // 2
     CENTER_Y = 1100  # ближе к низу, чтобы голова в кадре не перекрывалась
+    LINE_H = int(regular_size * 1.25)  # вертикальный шаг между словами в фразе
+    GAP_MS = 60  # минимальный зазор между событиями, чтобы не было визуального наложения
 
     def key_anim_tags(x: int, y: int, fs: int) -> str:
         if animation == "slide_up":
@@ -350,24 +352,27 @@ def build_user_ass(
     PAUSE_MS = 400          # пауза >0.4с разрывает фразу
     MAX_PHRASE_WORDS = 5    # макс слов в одной фразе
 
+    # Сначала собираем сегменты (key или phrase) с их start/end_ms
+    # Потом подрезаем end, чтобы соседи не пересекались на экране
+    segments: list[dict] = []  # {'type': 'key'|'phrase', 'start': ms, 'end': ms, 'data': ...}
+
     n = len(transcript_words)
     i = 0
     while i < n:
         word = transcript_words[i]
         idx = word.get("idx", i)
         if idx in key_indices:
-            # Ключевое слово — соло, с выбранной анимацией
-            text = word["w"].upper()
             w_start_ms = word["start_ms"]
-            w_end_ms = max(word["end_ms"] + 200, w_start_ms + 550)  # держим минимум 0.55 сек
-            tags = key_anim_tags(CENTER_X, CENTER_Y, key_size)
-            events.append(
-                f"Dialogue: 0,{_ass_time(w_start_ms / 1000)},{_ass_time(w_end_ms / 1000)},Active,,0,0,0,,{{{tags}}}{_escape_ass(text)}"
-            )
+            w_end_ms = max(word["end_ms"] + 200, w_start_ms + 550)
+            segments.append({
+                "type": "key",
+                "start": w_start_ms,
+                "end": w_end_ms,
+                "text": word["w"].upper(),
+            })
             i += 1
             continue
 
-        # Собираем фразу обычных слов до: паузы, ключевого, или 5 слов
         phrase = []
         while i < n and len(phrase) < MAX_PHRASE_WORDS:
             w = transcript_words[i]
@@ -384,28 +389,49 @@ def build_user_ass(
         if not phrase:
             continue
 
-        # Строим Dialogue с typewriter-эффектом:
-        # фраза висит от первого слова до последнего + 300мс хвост
-        ph_start_ms = phrase[0]["start_ms"]
-        ph_end_ms = phrase[-1]["end_ms"] + 300
+        segments.append({
+            "type": "phrase",
+            "start": phrase[0]["start_ms"],
+            "end": phrase[-1]["end_ms"] + 300,
+            "phrase": phrase,
+        })
 
-        # Базовые теги фразы (расположение + основной стиль)
-        base = regular_tag(CENTER_X, CENTER_Y, regular_size)
+    # Подрезаем конец каждого сегмента, чтобы не пересекался со следующим
+    for k in range(len(segments) - 1):
+        nxt_start = segments[k + 1]["start"]
+        if segments[k]["end"] > nxt_start - GAP_MS:
+            new_end = nxt_start - GAP_MS
+            if new_end <= segments[k]["start"] + 200:
+                new_end = segments[k]["start"] + 200
+            segments[k]["end"] = new_end
 
-        # Каждое слово стартует невидимым (\alpha&HFF&) и появляется в свой timestamp
-        parts = []
+    # Рендер
+    for seg in segments:
+        if seg["type"] == "key":
+            tags = key_anim_tags(CENTER_X, CENTER_Y, key_size)
+            events.append(
+                f"Dialogue: 0,{_ass_time(seg['start'] / 1000)},{_ass_time(seg['end'] / 1000)},Active,,0,0,0,,{{{tags}}}{_escape_ass(seg['text'])}"
+            )
+            continue
+
+        phrase = seg["phrase"]
+        ph_start_ms = seg["start"]
+        ph_end_ms = seg["end"]
+
+        # Стек вертикальный: центр стека = CENTER_Y, слова раздвигаются вверх/вниз
+        count = len(phrase)
+        top_y = CENTER_Y - int((count - 1) * LINE_H / 2)
+
+        # Каждое слово — отдельный Dialogue на своей строке Y, появляется в свой timestamp
         for j, w in enumerate(phrase):
-            rel_start = w["start_ms"] - ph_start_ms  # ms от начала Dialogue
-            fade_in_end = rel_start + 120             # 120ms fade
-            sep = " " if j > 0 else ""
-            # \alpha&HFF& — невидимый; \t(t1,t2,\alpha&H00&) — fade in
-            word_tag = f"\\alpha&HFF&\\t({rel_start},{fade_in_end},\\alpha&H00&)"
-            parts.append(f"{sep}{{{word_tag}}}{_escape_ass(w['w'].upper())}{{\\r}}")
-
-        text_block = "".join(parts)
-        events.append(
-            f"Dialogue: 0,{_ass_time(ph_start_ms / 1000)},{_ass_time(ph_end_ms / 1000)},Active,,0,0,0,,{{{base}}}{text_block}"
-        )
+            y = top_y + j * LINE_H
+            w_start_ms = w["start_ms"]
+            if w_start_ms >= ph_end_ms:
+                continue
+            base = regular_tag(CENTER_X, y, regular_size)
+            events.append(
+                f"Dialogue: 0,{_ass_time(w_start_ms / 1000)},{_ass_time(ph_end_ms / 1000)},Active,,0,0,0,,{{{base}}}{_escape_ass(w['w'].upper())}"
+            )
 
     # Header для произвольного preset — простой Active
     # Делаем headerless (Active style используется как fallback, но мы override через inline теги)
