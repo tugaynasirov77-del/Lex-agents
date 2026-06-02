@@ -464,7 +464,7 @@ def build_user_ass(
             f"\\pos({CENTER_X},{CENTER_Y})"
             f"\\fad(120,100)"
             f"\\fs{regular_size}"
-            f"\\3c{outline_ass}\\bord3"
+            f"\\3c{outline_ass}\\bord5"
             f"\\fn{preset.font_name}\\b1"
             f"\\an5"
             f"\\fscx92\\fscy92\\t(0,180,\\fscx100\\fscy100)"
@@ -485,7 +485,7 @@ WrapStyle: 0
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Active,{preset.font_name},{regular_size},{primary_ass},&H000000FF,{outline_ass},&H64000000,1,0,0,0,100,100,0,0,1,3,0,5,40,40,40,1
-Style: PhraseBox,{preset.font_name},{regular_size},{primary_ass},&H000000FF,{outline_ass},{box_ass},1,0,0,0,100,100,0,0,3,18,0,5,40,40,40,1
+Style: PhraseBox,{preset.font_name},{regular_size},{primary_ass},&H000000FF,{outline_ass},&H64000000,1,0,0,0,100,100,0,0,1,5,0,5,40,40,40,1
 Style: KeyWord,{preset.font_name},{key_size},{primary_ass},&H000000FF,{outline_ass},&H00000000,1,0,0,0,100,100,0,0,1,5,0,5,40,40,40,1
 
 [Events]
