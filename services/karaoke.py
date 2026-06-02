@@ -282,6 +282,7 @@ def build_user_ass(
     animation: str,
     out_path: str,
     preset: StyleConfig,
+    emoji_map: dict[int, str] | None = None,
 ) -> str:
     """Рендер ASS на основе пользовательской выборки.
 
@@ -350,13 +351,7 @@ def build_user_ass(
     # (typewriter-эффект: фраза строится в темп речи)
     PAUSE_MS = 400          # пауза >0.4с разрывает фразу
     MAX_PHRASE_WORDS = 5    # макс слов в одной фразе
-
-    # Служебные/филлерные слова — рендерим курсивом для лёгкой дифференциации
-    FILLER_WORDS = {
-        "вот", "короче", "ну", "типа", "значит", "это", "блин",
-        "там", "просто", "как-бы", "вообще", "кстати", "слушай",
-        "смотри", "понимаешь", "знаешь", "допустим", "скажем",
-    }
+    emoji_map = emoji_map or {}
 
     # Сначала собираем сегменты (key или phrase) с их start/end_ms
     # Потом подрезаем end, чтобы соседи не пересекались на экране
@@ -378,6 +373,7 @@ def build_user_ass(
                 "start": w_start_ms,
                 "end": w_end_ms,
                 "text": word["w"].upper(),
+                "emoji": emoji_map.get(idx, ""),
             })
             i += 1
             continue
@@ -432,8 +428,11 @@ def build_user_ass(
             else:
                 fs_key = int(key_size * 0.50)
             tags = key_anim_tags(CENTER_X, CENTER_Y, fs_key, color_ass)
+            emoji = seg.get("emoji") or ""
+            # emoji справа от слова, через пробел; цвет emoji сбрасывается на белый
+            emoji_part = f" {{\\1c&H00FFFFFF&\\3a&HFF&\\bord0}}{emoji}" if emoji else ""
             events.append(
-                f"Dialogue: 1,{_ass_time(seg['start'] / 1000)},{_ass_time(seg['end'] / 1000)},KeyWord,,0,0,0,,{{{tags}}}{_escape_ass(seg['text'])}"
+                f"Dialogue: 1,{_ass_time(seg['start'] / 1000)},{_ass_time(seg['end'] / 1000)},KeyWord,,0,0,0,,{{{tags}}}{_escape_ass(seg['text'])}{emoji_part}"
             )
             continue
 
@@ -461,12 +460,7 @@ def build_user_ass(
             sep = ""
             if j > 0:
                 sep = "\\N" if j == line_break_idx else " "
-            raw_lower = _strip_punct(w["w"]).lower()
-            is_filler = raw_lower in FILLER_WORDS
-            if is_filler:
-                parts.append(f"{sep}{{\\i1\\fscx88\\fscy88}}{_escape_ass(words_upper[j])}{{\\i0\\fscx100\\fscy100}}")
-            else:
-                parts.append(f"{sep}{_escape_ass(words_upper[j])}")
+            parts.append(f"{sep}{_escape_ass(words_upper[j])}")
 
         inner = "".join(parts)
         # Базовые теги фразы: позиция, pop-in (мягкий), шрифт

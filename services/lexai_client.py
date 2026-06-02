@@ -80,6 +80,26 @@ def caption_from_transcript(*, project_id: str, draft_id: str, transcript: str) 
     return r.json()
 
 
+def emoji_for_words(words: list[str], context: str = "") -> dict[str, str]:
+    """Зовёт Claude haiku через Mini App API. Возвращает {WORD: "🚀" или ""}."""
+    if not words:
+        return {}
+    try:
+        with httpx.Client(timeout=30.0) as client:
+            r = client.post(
+                f"{_base()}/api/ig/emoji-for-words",
+                json={"words": words, "context": context[:2000]},
+                headers=_headers(),
+            )
+        if r.status_code >= 400:
+            log.warning("emoji-for-words failed %s: %s", r.status_code, r.text[:200])
+            return {}
+        return r.json().get("emojis", {}) or {}
+    except Exception as e:
+        log.warning("emoji-for-words error: %s", e)
+        return {}
+
+
 def report_failure(job_id: str, *, error: str) -> None:
     with httpx.Client(timeout=15.0) as client:
         r = client.post(
