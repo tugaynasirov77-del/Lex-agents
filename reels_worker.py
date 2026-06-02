@@ -118,27 +118,12 @@ def process_job(job: dict) -> None:
         lexai_client.report_progress(job_id, phase="render")
         key_indices = set(user_selections.get("key_indices") or [])
         animation = user_selections.get("animation", "slide_up")
-
-        # Emoji для каждого ключевого слова — через Claude haiku (idx → "🚀")
-        emoji_map: dict[int, str] = {}
-        if key_indices:
-            key_word_texts = [w["w"] for w in transcript_words if w.get("idx") in key_indices]
-            context_text = " ".join(w["w"] for w in transcript_words)
-            picked = lexai_client.emoji_for_words(key_word_texts, context=context_text)
-            for w in transcript_words:
-                if w.get("idx") in key_indices:
-                    em = picked.get(w["w"].upper(), "")
-                    if em:
-                        emoji_map[w["idx"]] = em
-            log.info("emoji-map: %d/%d ключевых получили emoji", len(emoji_map), len(key_indices))
-
         karaoke.build_user_ass(
             transcript_words=transcript_words,
             key_indices=key_indices,
             animation=animation,
             out_path=ass_path,
             preset=preset,
-            emoji_map=emoji_map,
         )
 
         ffmpeg_processor.render_reel(
