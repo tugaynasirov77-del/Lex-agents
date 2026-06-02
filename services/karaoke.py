@@ -418,20 +418,20 @@ def build_user_ass(
         ph_start_ms = seg["start"]
         ph_end_ms = seg["end"]
 
-        # Стек вертикальный: центр стека = CENTER_Y, слова раздвигаются вверх/вниз
-        count = len(phrase)
-        top_y = CENTER_Y - int((count - 1) * LINE_H / 2)
-
-        # Каждое слово — отдельный Dialogue на своей строке Y, появляется в свой timestamp
-        for j, w in enumerate(phrase):
-            y = top_y + j * LINE_H
-            w_start_ms = w["start_ms"]
-            if w_start_ms >= ph_end_ms:
-                continue
-            base = regular_tag(CENTER_X, y, regular_size)
-            events.append(
-                f"Dialogue: 0,{_ass_time(w_start_ms / 1000)},{_ass_time(ph_end_ms / 1000)},Active,,0,0,0,,{{{base}}}{_escape_ass(w['w'].upper())}"
-            )
+        # Вся фраза одной горизонтальной строкой, pop-in целиком (как Klap)
+        text = " ".join(w["w"].upper() for w in phrase)
+        tags = (
+            f"\\pos({CENTER_X},{CENTER_Y})"
+            f"\\fad(120,100)"
+            f"\\fs{regular_size}"
+            f"\\1c{primary_ass}\\3c{outline_ass}\\bord3"
+            f"\\fn{preset.font_name}\\b1"
+            f"\\an5"
+            f"\\fscx88\\fscy88\\t(0,160,\\fscx100\\fscy100)"
+        )
+        events.append(
+            f"Dialogue: 0,{_ass_time(ph_start_ms / 1000)},{_ass_time(ph_end_ms / 1000)},Active,,0,0,0,,{{{tags}}}{_escape_ass(text)}"
+        )
 
     # Header для произвольного preset — простой Active
     # Делаем headerless (Active style используется как fallback, но мы override через inline теги)
