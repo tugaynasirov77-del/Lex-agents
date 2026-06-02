@@ -114,32 +114,73 @@ def transcribe_to_words(audio_or_video_path: str, *, language: str = "ru") -> li
         with open(srt_path, "r", encoding="utf-8") as f:
             srt = f.read()
 
-    # парсим SRT в [{idx,w,start_ms,end_ms}]
-    pattern = _re.compile(
-        r"(\d+)\s*\n(\d{2}):(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})[,.](\d{3})\s*\n([\s\S]*?)(?=\n\s*\n|\Z)",
-        _re.M,
+    # Робастный line-by-line парсер SRT (regex-вариант неаккуратно ловил соседние блоки)
+    time_re = _re.compile(
+        r"^(\d{2}):(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})[,.](\d{3})\s*$"
     )
-    punct_re = _re.compile(r"[.,!?;:\"'«»()\[\]…]+")
+    punct_re = _re.compile(r"[.,!?;:\"'«»()\[\]…—–-]+")
 
     words: list[dict] = []
-    idx = 0
-    for m in pattern.finditer(srt):
-        h1, m1, s1, ms1 = int(m.group(2)), int(m.group(3)), int(m.group(4)), int(m.group(5))
-        h2, m2, s2, ms2 = int(m.group(6)), int(m.group(7)), int(m.group(8)), int(m.group(9))
-        start_ms = (h1 * 3600 + m1 * 60 + s1) * 1000 + ms1
-        end_ms = (h2 * 3600 + m2 * 60 + s2) * 1000 + ms2
-        raw = m.group(10).strip().replace("\n", " ")
-        # whisper -ml1 иногда даёт пробельный или пунктуационный сегмент — пропускаем
-        clean = punct_re.sub("", raw).strip()
-        if not clean or len(clean) < 2:
+    lines = [ln.rstrip() for ln in srt.split("\n")]
+    i = 0
+    n = len(lines)
+    while i < n:
+        # Пропускаем пустые
+        while i < n and not lines[i].strip():
+            i += 1
+        if i >= n:
+            break
+        # Индекс блока (число)
+        if not lines[i].strip().isdigit():
+            i += 1
             continue
-        words.append({
-            "idx": idx,
-            "w": clean,
-            "start_ms": start_ms,
-            "end_ms": end_ms,
-        })
-        idx += 1
+        i += 1
+        if i >= n:
+            break
+        # Timing-строка
+        m = time_re.match(lines[i].strip())
+        if not m:
+            continue
+        i += 1
+        h1, m1, s1, ms1 = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
+        h2, m2_, s2, ms2 = int(m.group(5)), int(m.group(6)), int(m.group(7)), int(m.group(8))
+        start_ms = (h1 * 3600 + m1 * 60 + s1) * 1000 + ms1
+        end_ms = (h2 * 3600 + m2_ * 60 + s2) * 1000 + ms2
+
+        # Текст — до пустой строки или следующего числа-индекса
+        text_lines = []
+        while i < n and lines[i].strip():
+            # Если строка — число-индекс следующего блока и за ней timing — стоп
+            if lines[i].strip().isdigit() and i + 1 < n and time_re.match(lines[i + 1].strip()):
+                break
+            text_lines.append(lines[i].strip())
+            i += 1
+        raw = " ".join(text_lines).strip()
+        if not raw:
+            continue
+
+        # whisper иногда вкладывает несколько слов в один сегмент (если -ml не сработал)
+        # → разбиваем по пробелам и распределяем время пропорционально
+        chunks = raw.split()
+        if not chunks:
+            continue
+        seg_dur = max(50, end_ms - start_ms)
+        wt_total = sum(len(c) for c in chunks) or 1
+        cur = start_ms
+        for c in chunks:
+            wd = seg_dur * len(c) / wt_total
+            w_start = int(cur)
+            w_end = int(cur + wd)
+            cur += wd
+            clean = punct_re.sub("", c).strip()
+            if not clean or len(clean) < 2:
+                continue
+            words.append({
+                "idx": len(words),
+                "w": clean,
+                "start_ms": w_start,
+                "end_ms": w_end,
+            })
 
     log.info("word-level: %d words", len(words))
     return words
