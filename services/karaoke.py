@@ -295,45 +295,45 @@ def build_user_ass(
     regular_size = int(round(CANVAS_H * 0.050))   # ~96px
     key_size = int(round(CANVAS_H * 0.090))       # ~173px
     primary_ass = hex_to_ass(preset.primary_hex if preset.primary_hex != "#0B0F1A" else "#FFFFFF")
-    key_color = (preset.accent_colors or ["#FFD54F"])[0]
-    key_ass = hex_to_ass(key_color)
+    # Палитра для ключевых слов — циклически по очереди (как у Klap)
+    ACCENT_HEXES = preset.accent_colors or ["#FFD54F", "#4FC3F7", "#FF8A65", "#FFFFFF"]
+    if len(ACCENT_HEXES) < 2:
+        ACCENT_HEXES = ACCENT_HEXES + ["#4FC3F7", "#FF8A65"]
+    accent_asses = [hex_to_ass(c) for c in ACCENT_HEXES]
+    # Цвет уже произнесённого слова в karaoke-подсветке
+    spoken_ass = hex_to_ass("#9AA0A6")
     outline_ass = hex_to_ass("#000000")
+    # Полупрозрачная плашка-подложка под фразу (BorderStyle=3 в стиле PhraseBox)
+    box_ass = hex_to_ass("#000000", alpha=110)  # alpha 110 ≈ 57% непрозрачность
 
     CENTER_X = CANVAS_W // 2
     CENTER_Y = 1100  # ближе к низу, чтобы голова в кадре не перекрывалась
     LINE_H = int(regular_size * 1.25)  # вертикальный шаг между словами в фразе
     GAP_MS = 60  # минимальный зазор между событиями, чтобы не было визуального наложения
 
-    def key_anim_tags(x: int, y: int, fs: int) -> str:
+    def key_anim_tags(x: int, y: int, fs: int, color_ass: str) -> str:
+        # shake: микро-дрожание поворотом ±3° в первые 240мс — добавляет "удар"
+        shake = "\\t(0,80,\\frz3)\\t(80,160,\\frz-3)\\t(160,240,\\frz0)"
+        base = (
+            f"\\fs{fs}"
+            f"\\1c{color_ass}\\3c{outline_ass}\\bord5"
+            f"\\fn{preset.font_name}\\b1"
+            f"\\an5"
+        )
         if animation == "slide_up":
-            # выкатывается снизу
             return (
-                f"\\move({x},{y + 120},{x},{y},0,220)"
-                f"\\fad(180,80)"
-                f"\\fs{fs}"
-                f"\\1c{key_ass}\\3c{outline_ass}\\bord4"
-                f"\\fn{preset.font_name}\\b1"
-                f"\\fscx80\\fscy80\\t(0,200,\\fscx108\\fscy108)\\t(200,330,\\fscx100\\fscy100)"
-                f"\\an5"
+                f"\\move({x},{y + 120},{x},{y},0,220)\\fad(180,80){base}"
+                f"\\fscx80\\fscy80\\t(0,200,\\fscx110\\fscy110)\\t(200,330,\\fscx100\\fscy100)"
+                f"{shake}"
             )
         if animation == "pop":
             return (
-                f"\\pos({x},{y})"
-                f"\\fad(80,80)"
-                f"\\fs{fs}"
-                f"\\1c{key_ass}\\3c{outline_ass}\\bord4"
-                f"\\fn{preset.font_name}\\b1"
-                f"\\fscx0\\fscy0\\t(0,180,\\fscx115\\fscy115)\\t(180,280,\\fscx100\\fscy100)"
-                f"\\an5"
+                f"\\pos({x},{y})\\fad(80,80){base}"
+                f"\\fscx0\\fscy0\\t(0,180,\\fscx118\\fscy118)\\t(180,280,\\fscx100\\fscy100)"
+                f"{shake}"
             )
-        # fade
         return (
-            f"\\pos({x},{y})"
-            f"\\fad(200,100)"
-            f"\\fs{fs}"
-            f"\\1c{key_ass}\\3c{outline_ass}\\bord4"
-            f"\\fn{preset.font_name}\\b1"
-            f"\\an5"
+            f"\\pos({x},{y})\\fad(200,100){base}{shake}"
         )
 
     def regular_tag(x: int, y: int, fs: int) -> str:
@@ -363,7 +363,10 @@ def build_user_ass(
         idx = word.get("idx", i)
         if idx in key_indices:
             w_start_ms = word["start_ms"]
-            w_end_ms = max(word["end_ms"] + 200, w_start_ms + 550)
+            # length-aware hold: длинные слова держим дольше
+            text_len = len(word["w"])
+            hold_min = 600 + text_len * 35
+            w_end_ms = max(word["end_ms"] + 250, w_start_ms + hold_min)
             segments.append({
                 "type": "key",
                 "start": w_start_ms,
@@ -406,11 +409,15 @@ def build_user_ass(
             segments[k]["end"] = new_end
 
     # Рендер
+    key_color_counter = 0
     for seg in segments:
         if seg["type"] == "key":
-            tags = key_anim_tags(CENTER_X, CENTER_Y, key_size)
+            # циклическая палитра для ключевых
+            color_ass = accent_asses[key_color_counter % len(accent_asses)]
+            key_color_counter += 1
+            tags = key_anim_tags(CENTER_X, CENTER_Y, key_size, color_ass)
             events.append(
-                f"Dialogue: 0,{_ass_time(seg['start'] / 1000)},{_ass_time(seg['end'] / 1000)},Active,,0,0,0,,{{{tags}}}{_escape_ass(seg['text'])}"
+                f"Dialogue: 1,{_ass_time(seg['start'] / 1000)},{_ass_time(seg['end'] / 1000)},KeyWord,,0,0,0,,{{{tags}}}{_escape_ass(seg['text'])}"
             )
             continue
 
@@ -418,19 +425,52 @@ def build_user_ass(
         ph_start_ms = seg["start"]
         ph_end_ms = seg["end"]
 
-        # Вся фраза одной горизонтальной строкой, pop-in целиком (как Klap)
-        text = " ".join(w["w"].upper() for w in phrase)
-        tags = (
+        # Авто-перенос: если фраза длинная — разбиваем на 2 строки по середине
+        words_upper = [w["w"].upper() for w in phrase]
+        total_chars = sum(len(w) for w in words_upper) + len(words_upper) - 1
+        line_break_idx = -1
+        if total_chars > 18 and len(words_upper) >= 2:
+            # ищем сплит ближе к середине
+            half = total_chars / 2
+            cum = 0
+            for k, w in enumerate(words_upper):
+                cum += len(w) + (1 if k > 0 else 0)
+                if cum >= half:
+                    line_break_idx = k  # перенос ПЕРЕД этим индексом (k+1-е слово на новой строке)
+                    break
+
+        # Karaoke-подсветка: каждое слово окрашено в primary, в свой момент → accent, потом → spoken
+        parts = []
+        for j, w in enumerate(phrase):
+            rel_start = max(0, w["start_ms"] - ph_start_ms)
+            rel_end = min(ph_end_ms - ph_start_ms, max(rel_start + 100, w["end_ms"] - ph_start_ms))
+            # цвет активного слова — циклический accent
+            active_color = accent_asses[(key_color_counter + j) % len(accent_asses)]
+            sep = ""
+            if j > 0:
+                sep = "\\N" if j == line_break_idx else " "
+            word_block = (
+                f"{sep}"
+                f"{{\\1c{primary_ass}"
+                f"\\t({rel_start},{rel_start + 60},\\1c{active_color})"
+                f"\\t({rel_end},{rel_end + 80},\\1c{spoken_ass})}}"
+                f"{_escape_ass(words_upper[j])}"
+            )
+            parts.append(word_block)
+
+        inner = "".join(parts)
+        # Базовые теги фразы: позиция, pop-in (мягкий), шрифт
+        base = (
             f"\\pos({CENTER_X},{CENTER_Y})"
             f"\\fad(120,100)"
             f"\\fs{regular_size}"
-            f"\\1c{primary_ass}\\3c{outline_ass}\\bord3"
+            f"\\3c{outline_ass}\\bord3"
             f"\\fn{preset.font_name}\\b1"
             f"\\an5"
-            f"\\fscx88\\fscy88\\t(0,160,\\fscx100\\fscy100)"
+            f"\\fscx92\\fscy92\\t(0,180,\\fscx100\\fscy100)"
         )
         events.append(
-            f"Dialogue: 0,{_ass_time(ph_start_ms / 1000)},{_ass_time(ph_end_ms / 1000)},Active,,0,0,0,,{{{tags}}}{_escape_ass(text)}"
+            f"Dialogue: 0,{_ass_time(ph_start_ms / 1000)},{_ass_time(ph_end_ms / 1000)},PhraseBox,,0,0,0,,{{{base}}}{inner}"
         )
 
     # Header для произвольного preset — простой Active
@@ -445,6 +485,8 @@ WrapStyle: 0
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Active,{preset.font_name},{regular_size},{primary_ass},&H000000FF,{outline_ass},&H64000000,1,0,0,0,100,100,0,0,1,3,0,5,40,40,40,1
+Style: PhraseBox,{preset.font_name},{regular_size},{primary_ass},&H000000FF,{outline_ass},{box_ass},1,0,0,0,100,100,0,0,3,18,0,5,40,40,40,1
+Style: KeyWord,{preset.font_name},{key_size},{primary_ass},&H000000FF,{outline_ass},&H00000000,1,0,0,0,100,100,0,0,1,5,0,5,40,40,40,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text

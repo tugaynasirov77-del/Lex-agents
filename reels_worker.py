@@ -126,20 +126,6 @@ def process_job(job: dict) -> None:
             preset=preset,
         )
 
-        # SFX для каждого ключевого слова — в зависимости от анимации
-        SFX_DIR = "/root/Lex-agents/sfx"
-        sfx_map = {
-            "slide_up": f"{SFX_DIR}/whoosh.wav",
-            "pop": f"{SFX_DIR}/pop.wav",
-            "fade": f"{SFX_DIR}/click.wav",
-        }
-        sfx_path = sfx_map.get(animation)
-        sfx_events: list[tuple[int, str]] = []
-        if sfx_path and os.path.exists(sfx_path):
-            for w in transcript_words:
-                if w.get("idx") in key_indices:
-                    sfx_events.append((int(w["start_ms"]), sfx_path))
-
         ffmpeg_processor.render_reel(
             input_video=raw_mp4,
             subs_path=ass_path,
@@ -148,7 +134,7 @@ def process_job(job: dict) -> None:
             output_path=out_mp4,
             hook_zoom=True,
             preset=preset,
-            sfx_events=sfx_events,
+            sfx_events=[],
         )
         ffmpeg_processor.extract_cover(out_mp4, cover_jpg, at_second=1.5)
 
