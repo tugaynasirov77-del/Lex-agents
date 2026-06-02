@@ -294,12 +294,13 @@ def build_user_ass(
 
     regular_size = int(round(CANVAS_H * 0.050))   # ~96px
     key_size = int(round(CANVAS_H * 0.090))       # ~173px
-    primary_ass = hex_to_ass(preset.primary_hex if preset.primary_hex != "#0B0F1A" else "#FFFFFF")
-    # Палитра для ключевых слов — мягкая, без агрессивного красного (как у Klap)
-    ACCENT_HEXES = ["#FFD54F", "#FFFFFF", "#4FC3F7"]
+    # Фразы — всегда строго белые
+    primary_ass = hex_to_ass("#FFFFFF")
+    # Палитра только для КЛЮЧЕВЫХ: жёлтый + белый, без синего и красного
+    ACCENT_HEXES = ["#FFD54F", "#FFFFFF"]
     accent_asses = [hex_to_ass(c) for c in ACCENT_HEXES]
-    # Цвет уже произнесённого слова в karaoke-подсветке
-    spoken_ass = hex_to_ass("#9AA0A6")
+    # Тёмный серый для произнесённых слов — заметнее затемнение
+    spoken_ass = hex_to_ass("#3A3A3A")
     outline_ass = hex_to_ass("#000000")
     # Полупрозрачная плашка-подложка под фразу (BorderStyle=3 в стиле PhraseBox)
     box_ass = hex_to_ass("#000000", alpha=110)  # alpha 110 ≈ 57% непрозрачность
@@ -393,7 +394,7 @@ def build_user_ass(
         segments.append({
             "type": "phrase",
             "start": phrase[0]["start_ms"],
-            "end": phrase[-1]["end_ms"] + 300,
+            "end": phrase[-1]["end_ms"] + 550,
             "phrase": phrase,
         })
 
