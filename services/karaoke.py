@@ -450,25 +450,11 @@ def build_user_ass(
 
         # Karaoke-подсветка: каждое слово окрашено в primary, в свой момент → accent, потом → spoken
         parts = []
-        ph_dur = ph_end_ms - ph_start_ms
         for j, w in enumerate(phrase):
-            rel_start = max(0, w["start_ms"] - ph_start_ms)
-            # для последнего слова: даём 200мс на анимацию затемнения внутри длительности фразы
-            raw_end = max(rel_start + 100, w["end_ms"] - ph_start_ms)
-            rel_end = min(raw_end, ph_dur - 220)
-            if rel_end < rel_start + 80:
-                rel_end = rel_start + 80
-            # без цветной подсветки: слово остаётся белым, после произнесения плавно темнеет в серый
             sep = ""
             if j > 0:
                 sep = "\\N" if j == line_break_idx else " "
-            word_block = (
-                f"{sep}"
-                f"{{\\1c{primary_ass}"
-                f"\\t({rel_end},{rel_end + 180},\\1c{spoken_ass})}}"
-                f"{_escape_ass(words_upper[j])}"
-            )
-            parts.append(word_block)
+            parts.append(f"{sep}{_escape_ass(words_upper[j])}")
 
         inner = "".join(parts)
         # Базовые теги фразы: позиция, pop-in (мягкий), шрифт
